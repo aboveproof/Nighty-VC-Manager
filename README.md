@@ -91,6 +91,35 @@ If Nighty does not include `aiohttp`, install it in the Python environment used 
 pip install aiohttp
 ```
 
+## Language and architecture
+
+VC Manager is written in **Python for NightyScript 4.9**. NightyScript is Nighty's embedded scripting environment, not a standalone Discord bot framework. Nighty owns the logged-in Discord client and injects its scripting API into the file when the script loads.
+
+That distinction matters if you plan to read, modify, or contribute to the code:
+
+- `@nightyScript(...)` declares the script and its metadata. The decorated entry function is called at the bottom of the file to register the UI, listeners, commands, and background tasks.
+- `bot`, `bot_app`, `UI`, `Tab`, `getConfigData`, `updateConfigData`, and `getScriptsPath` come from Nighty's runtime. They are available without imports.
+- The script must not import `discord`, `nighty`, or symbols from either package. Nighty uses a modified `discord.py-self` environment and provides supported objects itself.
+- Discord and Nighty operations are asynchronous. Connection work, API requests, UI callbacks, event listeners, and cleanup run through `async` functions and tasks.
+- The dashboard uses CUI. Python classes describe elements with HTML templates, while Nighty connects their callbacks to the embedded web interface.
+- Slash commands use Nighty's `bot_app` client and Discord application-command endpoints. Responses use Discord Components V2 where available instead of `discord.Embed`, which NightyScript does not support.
+- Persistent settings use Nighty's configuration store for simple values and JSON files under `getScriptsPath()` for session history and managed accounts.
+- Secondary accounts do not become additional Nighty clients. Each one opens its own authenticated Discord Gateway and voice connection managed by this script.
+
+The main runtime path is:
+
+```text
+Nighty loads VCManagerV4.py
+  -> @nightyScript initializes the script
+  -> CUI registers the VC Manager tab
+  -> bot_app synchronizes /vc commands
+  -> a dashboard action or slash command updates managed state
+  -> Discord Gateway and voice WebSocket tasks apply the change
+  -> JSON storage records settings and session history
+```
+
+See [`AGENTS.md`](./AGENTS.md) for the NightyScript 4.9 API notes and repository rules used by this project. Those notes document supported script structure, storage, event listeners, message sending, asynchronous work, and prohibited imports.
+
 ## Installation
 
 1. Download [`VCManagerV4.py`](./VCManagerV4.py).
