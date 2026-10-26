@@ -7,7 +7,7 @@ Voice controls, session tracking, automation, slash commands, and multi-account 
 [![Version](https://img.shields.io/badge/version-4.0-5865F2?style=flat-square)](./VCManagerV4.py)
 [![NightyScript](https://img.shields.io/badge/NightyScript-4.9-111827?style=flat-square)](https://nighty.one/)
 [![Python](https://img.shields.io/badge/Python-3.x-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VcManager/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE)
 
 </div>
 
@@ -236,5 +236,5 @@ Check the token, account access to the server, and channel permissions. Remove a
 
 ## License
 
-Nighty VC Manager is released under the [MIT License](https://github.com/aboveproof/Nighty-VcManager/blob/main/LICENSE).
+Nighty VC Manager is released under the [MIT License](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE).
 

@@ -36,7 +36,7 @@ def vc_manager_farm_script():
 
     NOTES:
     - Slash responses use Discord Components V2 and the active Nighty V2 theme.
-      A bot-app embed is used only when Discord rejects a V2 response.
+      A plain-text response is used only when Discord rejects a V2 response.
     - Slash controls are restricted to the Nighty account owner.
     - VC Manager tracks only voice sessions opened through this script. Joining
       a call normally in Discord or Nighty does not change the manager panel.
@@ -56,9 +56,14 @@ def vc_manager_farm_script():
     import hashlib
     import inspect
     import json
+    import math
     import os
+    import shutil
+    import threading
+    import time
     import uuid
     from datetime import datetime
+    from html import escape as html_escape
     from pathlib import Path
     from typing import Literal
     from urllib.parse import quote
@@ -72,11 +77,20 @@ def vc_manager_farm_script():
     previous_runtime = getattr(bot, runtime_key, None)
     previous_token_clients = []
     previous_managed_target = None
+    previous_connection_start_time = None
     if isinstance(previous_runtime, dict):
         previous_token_clients = list(previous_runtime.get("token_clients", {}).values())
         saved_target = previous_runtime.get("managed_target")
         if isinstance(saved_target, dict):
             previous_managed_target = dict(saved_target)
+        saved_start_time = previous_runtime.get("connection_start_time")
+        if isinstance(saved_start_time, datetime):
+            previous_connection_start_time = saved_start_time
+        for event_name, previous_listener in previous_runtime.get("listeners", ()):
+            try:
+                bot.remove_listener(previous_listener, event_name)
+            except Exception as e:
+                print(f"[VC Manager] Could not remove a stale {event_name} listener: {e}", type_="ERROR")
         for previous_task in list(previous_runtime.get("tasks", ())):
             try:
                 if previous_task and not previous_task.done():
@@ -88,10 +102,33 @@ def vc_manager_farm_script():
             except Exception as e:
                 print(f"[VC Manager] Could not stop a stale task: {e}", type_="ERROR")
 
+    # Clean listeners left by builds that predate runtime listener tracking.
+    # discord.py stores @bot.listen handlers in extra_events.
+    legacy_listener_names = {
+        "on_voice_state_update": "handle_voice_state_update",
+        "on_ready": "handle_bot_ready",
+    }
+    extra_events = getattr(bot, "extra_events", {})
+    if isinstance(extra_events, dict):
+        for event_name, function_name in legacy_listener_names.items():
+            for old_listener in list(extra_events.get(event_name, ())):
+                listener_qualname = getattr(old_listener, "__qualname__", "")
+                if (
+                    getattr(old_listener, "__name__", "") == function_name
+                    and "vc_manager_farm_script.<locals>" in listener_qualname
+                ):
+                    try:
+                        bot.remove_listener(old_listener, event_name)
+                    except Exception as e:
+                        print(f"[VC Manager] Could not remove legacy {event_name} listener: {e}", type_="ERROR")
+
     runtime_state = {
         "tasks": set(),
         "token_clients": {},
         "managed_target": previous_managed_target,
+        "connection_start_time": previous_connection_start_time,
+        "listeners": [],
+        "backed_up_files": set(),
         "generation": uuid.uuid4().hex
     }
     setattr(bot, runtime_key, runtime_state)
@@ -103,7 +140,11 @@ def vc_manager_farm_script():
         "live_timer_ticker", "startup_sync", "timer", "reconnect_later",
         "_gateway_loop", "_heartbeat"
     }
-    bot_loop = getattr(bot, "loop", None)
+    try:
+        bot_loop = getattr(bot, "loop", None)
+    except Exception as e:
+        bot_loop = None
+        print(f"[VC Manager] Bot loop is not ready during cleanup: {e}", type_="ERROR")
     if bot_loop:
         try:
             legacy_tasks = list(asyncio.all_tasks(bot_loop))
@@ -196,125 +237,264 @@ def vc_manager_farm_script():
 
     JS_CUI = """
     (function() {
-        window.cUIData = window.cUIData || {};
-        window.cUIData.templates = window.cUIData.templates || {};
-        window.cUIData.renderCallable = function(payloadJSON) {
-                    const payload = JSON.parse(payloadJSON);
-                    const processTemplate = (str) => {
-                        if (!str) return str;
-                        let processedStr = str;
-                        for (const key in payload.props) {
-                            let value = payload.props[key];
-                            if (typeof value !== 'string' && typeof value !== 'number') {
-                                value = JSON.stringify(value);
-                            }
-                            processedStr = processedStr.replace(new RegExp(`\\\\$\\\\{data\\\\.${key}\\\\}`, 'g'), value);
-                        }
-                        return processedStr;
-                    };
+        const PREFIX = '__CUI__';
+        const cui = window.cUIData = window.cUIData || {};
+        cui.templates = cui.templates || {};
+        cui.version = 'vc-manager-reload-safe-v2';
 
-                    let finalHTML = processTemplate(payload.html);
-                    if (payload.create_js) payload.create_js = processTemplate(payload.create_js);
-                    if (payload.remove_js) payload.remove_js = processTemplate(payload.remove_js);
-
-                    payload.callbacks.forEach(cbName => {
-                        const removeLogic = payload.remove_js
-                            ? `const el = document.getElementById('${payload.hookId}'); if (el) { ${payload.remove_js.replace(/element/g, 'el')}; setTimeout(() => el.remove(), 200); }`
-                            : `const el = document.getElementById('${payload.hookId}'); if (el) el.remove();`;
-
-                        const handler = `(async (element) => { await pywebview.api.customCallback('_cui_cb', '${payload.hookId}', '${cbName}', element ? element.value : null); ${removeLogic} })(this)`;
-                        finalHTML = finalHTML.replace(new RegExp(`\\\\$\\\\{${cbName}\\\\}`, 'g'), handler);
-                    });
-
-                    const tempDiv = document.createElement('div');
-                    tempDiv.innerHTML = finalHTML;
-                    const userRootElement = tempDiv.firstElementChild;
-                    const wrapper = document.createElement('div');
-                    wrapper.id = payload.hookId;
-
-                    if (userRootElement) {
-                        wrapper.style.cssText = userRootElement.style.cssText;
-                        wrapper.innerHTML = userRootElement.innerHTML;
-                    } else {
-                        wrapper.innerHTML = finalHTML;
-                    }
-
-                    let targetContainer =
-                        document.querySelector('div[data-radix-scroll-area-viewport]') ||
-                        document.querySelector('div.w-full.overflow-auto._scrollbar_1gzhj_1') ||
-                        document.body;
-                    targetContainer.appendChild(wrapper);
-
-                    if (payload.create_js) {
-                        try {
-                            const animationFunc = new Function('element', payload.create_js);
-                            animationFunc(wrapper);
-                        } catch(e) { console.error("CUI Error executing create_js:", e); }
-                    }
-
-                    if (payload.allowOutsideClick) {
-                        let pressed = false;
-
-                        wrapper.addEventListener('mousedown', (e) => {
-                            if (e.target === wrapper) {
-                                pressed = true;
-                            }
-                        });
-
-                        wrapper.addEventListener('mouseup', (e) => {
-                            if (e.target === wrapper && pressed) {
-                                if (payload.remove_js) {
-                                    try {
-                                        const removeFunc = new Function('element', payload.remove_js);
-                                        removeFunc(wrapper);
-                                        setTimeout(() => wrapper.remove(), 200);
-                                    } catch (err) {
-                                        console.error("CUI Error executing remove_js on outside click:", err);
-                                        wrapper.remove();
-                                    }
-                                } else {
-                                    wrapper.remove();
-                                }
-                            }
-                            pressed = false;
-                        });
-                    }
-                };
-
-        window.cUIData.updateTemplates = function(newTemplates) {
-            Object.assign(window.cUIData.templates, newTemplates);
-            if (window.cUIData.scanAndInject) window.cUIData.scanAndInject();
+        const removeElement = function(element) {
+            if (!element) return;
+            if (typeof element.remove === 'function') element.remove();
+            else if (element.parentNode) element.parentNode.removeChild(element);
         };
-        window.cUIData.scanAndInject = function() {
-            const xpath = "//p[starts-with(text(), '__CUI__')]";
-            const placeholdersSnapshot = document.evaluate(xpath, document, null, XPathResult.UNORDERED_NODE_ITERATOR_TYPE, null);
-            const nodesToProcess = [];
-            let node = placeholdersSnapshot.iterateNext();
-            while (node) { nodesToProcess.push(node); node = placeholdersSnapshot.iterateNext(); }
-            nodesToProcess.forEach(placeholder => {
-                try {
-                    const jsonString = placeholder.textContent.substring('__CUI__'.length);
-                    const data = JSON.parse(jsonString);
-                    const template = window.cUIData.templates[data.type];
-                    if (template) {
-                        let finalHTML = template;
-                        for (const key in data.props) {
-                            finalHTML = finalHTML.replace(new RegExp(`\\\\$\\\\{data\\\\.${key}\\\\}`, 'g'), String(data.props[key] ?? ''));
-                        }
-                        data.callbacks.forEach(cbName => {
-                            const handler = `(async (element) => { await pywebview.api.customCallback('_cui_cb', '${data.hook}', '${cbName}', element.value); })(this)`;
-                            finalHTML = finalHTML.replace(new RegExp(`\\\\$\\\\{${cbName}\\\\}`, 'g'), handler);
-                        });
-                        placeholder.outerHTML = finalHTML;
-                    }
-                } catch (e) { console.error("CUI: Failed to parse or inject element:", e, placeholder.textContent); }
+
+        const processTemplate = function(template, props) {
+            let result = template || '';
+            Object.keys(props || {}).forEach(function(key) {
+                let value = props[key];
+                if (typeof value !== 'string' && typeof value !== 'number') {
+                    value = JSON.stringify(value);
+                }
+                result = result.replace(
+                    new RegExp('\\\\$\\\\{data\\\\.' + key + '\\\\}', 'g'),
+                    value == null ? '' : String(value)
+                );
             });
+            return result;
         };
-        if (window.cUIData.observer) window.cUIData.observer.disconnect();
-        const observer = new MutationObserver(() => window.cUIData.scanAndInject());
-        observer.observe(document.body, { childList: true, subtree: true });
-        window.cUIData.observer = observer;
-        window.cUIData.scanAndInject();
+
+        const callbackHandler = function(hookId, callbackName) {
+            return `(async (element) => {
+                try {
+                    if (!window.pywebview || !window.pywebview.api || !window.pywebview.api.customCallback) {
+                        throw new Error('Nighty callback bridge is not ready');
+                    }
+                    await window.pywebview.api.customCallback('_cui_cb', '${hookId}', '${callbackName}', element ? element.value : null);
+                } catch (error) {
+                    console.error('CUI callback failed:', error);
+                }
+            })(this)`;
+        };
+
+        cui.renderCallable = function(payloadJSON) {
+            let payload;
+            try {
+                payload = JSON.parse(payloadJSON);
+            } catch (error) {
+                console.error('CUI callable payload is invalid:', error);
+                return;
+            }
+
+            if (!document.body) {
+                setTimeout(function() { cui.renderCallable(payloadJSON); }, 50);
+                return;
+            }
+
+            let finalHTML = processTemplate(payload.html, payload.props);
+            if (payload.create_js) payload.create_js = processTemplate(payload.create_js, payload.props);
+            if (payload.remove_js) payload.remove_js = processTemplate(payload.remove_js, payload.props);
+
+            (payload.callbacks || []).forEach(function(callbackName) {
+                const removeLogic = payload.remove_js
+                    ? `const el = document.getElementById('${payload.hookId}'); if (el) { ${payload.remove_js.replace(/element/g, 'el')}; setTimeout(() => { if (el.remove) el.remove(); else if (el.parentNode) el.parentNode.removeChild(el); }, 200); }`
+                    : `const el = document.getElementById('${payload.hookId}'); if (el) { if (el.remove) el.remove(); else if (el.parentNode) el.parentNode.removeChild(el); }`;
+                const handler = callbackHandler(payload.hookId, callbackName).replace('})(this)', `    ${removeLogic}\n})(this)`);
+                finalHTML = finalHTML.replace(
+                    new RegExp('\\\\$\\\\{' + callbackName + '\\\\}', 'g'),
+                    handler
+                );
+            });
+
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = finalHTML;
+            const userRootElement = tempDiv.firstElementChild;
+            const wrapper = document.createElement('div');
+            wrapper.id = payload.hookId;
+
+            if (userRootElement) {
+                wrapper.style.cssText = userRootElement.style.cssText;
+                wrapper.innerHTML = userRootElement.innerHTML;
+            } else {
+                wrapper.innerHTML = finalHTML;
+            }
+
+            const oldWrapper = document.getElementById(payload.hookId);
+            if (oldWrapper) removeElement(oldWrapper);
+            const targetContainer =
+                document.querySelector('div[data-radix-scroll-area-viewport]') ||
+                document.querySelector('div.w-full.overflow-auto._scrollbar_1gzhj_1') ||
+                document.body;
+            targetContainer.appendChild(wrapper);
+
+            if (payload.create_js) {
+                try {
+                    new Function('element', payload.create_js)(wrapper);
+                } catch (error) {
+                    console.error('CUI create hook failed:', error);
+                }
+            }
+
+            if (payload.allowOutsideClick) {
+                let pressed = false;
+                wrapper.addEventListener('mousedown', function(event) {
+                    pressed = event.target === wrapper;
+                });
+                wrapper.addEventListener('mouseup', function(event) {
+                    if (event.target !== wrapper || !pressed) {
+                        pressed = false;
+                        return;
+                    }
+                    try {
+                        if (payload.remove_js) new Function('element', payload.remove_js)(wrapper);
+                    } catch (error) {
+                        console.error('CUI remove hook failed:', error);
+                    }
+                    setTimeout(function() { removeElement(wrapper); }, payload.remove_js ? 200 : 0);
+                    pressed = false;
+                });
+            }
+        };
+
+        cui.findPlaceholders = function(root) {
+            const searchRoot = root && root.nodeType ? root : document;
+            const found = [];
+            const seen = typeof Set === 'function' ? new Set() : null;
+            if (!document.createTreeWalker || typeof NodeFilter === 'undefined') {
+                const candidates = searchRoot.querySelectorAll ? searchRoot.querySelectorAll('p, span, div') : [];
+                Array.prototype.forEach.call(candidates, function(element) {
+                    if ((element.textContent || '').trim().indexOf(PREFIX) === 0) found.push(element);
+                });
+                return found;
+            }
+
+            const walker = document.createTreeWalker(
+                searchRoot,
+                NodeFilter.SHOW_TEXT,
+                {
+                    acceptNode: function(node) {
+                        return (node.nodeValue || '').trim().indexOf(PREFIX) === 0
+                            ? NodeFilter.FILTER_ACCEPT
+                            : NodeFilter.FILTER_REJECT;
+                    }
+                }
+            );
+            let textNode = walker.nextNode();
+            while (textNode) {
+                let element = textNode.parentElement;
+                while (element && element.parentElement) {
+                    const elementText = (element.textContent || '').trim();
+                    const parentText = (element.parentElement.textContent || '').trim();
+                    if (parentText !== elementText || parentText.indexOf(PREFIX) !== 0 || element.parentElement.children.length > 1) break;
+                    element = element.parentElement;
+                }
+                if (element && (!seen || !seen.has(element))) {
+                    if (seen) seen.add(element);
+                    found.push(element);
+                }
+                textNode = walker.nextNode();
+            }
+            return found;
+        };
+
+        cui.injectPlaceholder = function(placeholder) {
+            const raw = (placeholder.textContent || '').trim();
+            if (raw.indexOf(PREFIX) !== 0) return false;
+
+            let data;
+            try {
+                data = JSON.parse(raw.slice(PREFIX.length).trim());
+            } catch (error) {
+                if (!placeholder.dataset || placeholder.dataset.cuiParseLogged !== 'true') {
+                    console.error('CUI placeholder contains invalid JSON:', error, raw);
+                    if (placeholder.dataset) placeholder.dataset.cuiParseLogged = 'true';
+                }
+                return false;
+            }
+
+            const template = cui.templates[data.type];
+            if (!template) return false;
+            let finalHTML = processTemplate(template, data.props || {});
+            (data.callbacks || []).forEach(function(callbackName) {
+                finalHTML = finalHTML.replace(
+                    new RegExp('\\\\$\\\\{' + callbackName + '\\\\}', 'g'),
+                    callbackHandler(data.hook, callbackName)
+                );
+            });
+
+            const holder = document.createElement('div');
+            holder.innerHTML = finalHTML.trim();
+            const fragment = document.createDocumentFragment();
+            while (holder.firstChild) fragment.appendChild(holder.firstChild);
+            if (!placeholder.parentNode) return false;
+            placeholder.parentNode.replaceChild(fragment, placeholder);
+            return true;
+        };
+
+        cui.scanAndInject = function(root) {
+            if (cui.scanning) return;
+            cui.scanning = true;
+            try {
+                cui.findPlaceholders(root || document).forEach(function(placeholder) {
+                    try {
+                        cui.injectPlaceholder(placeholder);
+                    } catch (error) {
+                        console.error('CUI could not render a custom element:', error);
+                    }
+                });
+            } finally {
+                cui.scanning = false;
+            }
+        };
+
+        cui.scheduleScan = function(root) {
+            if (cui.scanScheduled) return;
+            cui.scanScheduled = true;
+            const run = function() {
+                cui.scanScheduled = false;
+                cui.scanAndInject(root || document);
+            };
+            if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
+            else setTimeout(run, 0);
+        };
+
+        cui.updateTemplates = function(newTemplates) {
+            Object.assign(cui.templates, newTemplates || {});
+            cui.scheduleScan(document);
+        };
+
+        cui.installRecovery = function() {
+            const target = document.documentElement || document.body;
+            if (!target) {
+                setTimeout(cui.installRecovery, 50);
+                return;
+            }
+
+            if (cui.observer && typeof cui.observer.disconnect === 'function') cui.observer.disconnect();
+            if (typeof MutationObserver === 'function') {
+                cui.observer = new MutationObserver(function() { cui.scheduleScan(document); });
+                cui.observer.observe(target, { childList: true, subtree: true, characterData: true });
+            }
+
+            if (cui.recoveryTimer) clearInterval(cui.recoveryTimer);
+            cui.recoveryTimer = setInterval(function() { cui.scanAndInject(document); }, 1000);
+
+            if (cui.recoveryHandler) {
+                window.removeEventListener('pageshow', cui.recoveryHandler);
+                window.removeEventListener('focus', cui.recoveryHandler);
+                document.removeEventListener('visibilitychange', cui.recoveryHandler);
+            }
+            cui.recoveryHandler = function() { cui.scheduleScan(document); };
+            window.addEventListener('pageshow', cui.recoveryHandler);
+            window.addEventListener('focus', cui.recoveryHandler);
+            document.addEventListener('visibilitychange', cui.recoveryHandler);
+            cui.scheduleScan(document);
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', cui.installRecovery, { once: true });
+        } else {
+            cui.installRecovery();
+        }
     })();
     """
 
@@ -390,20 +570,39 @@ def vc_manager_farm_script():
             evaluate_js(f"window.cUIData.updateTemplates({json.dumps(e_tmps)})")
     Tab.render = p_render
 
-    last_sid = [None]
-
     def reeval():
-        evaluate_js(JS_CUI)
+        try:
+            evaluate_js(JS_CUI)
 
-        e_tmps = {}
-        for name, definition in CUI.registry.items():
-            if definition["type"] == "element":
-                valid_params = definition["init_params"]
-                filtered_kwargs = {p: None for p in valid_params if p != 'self'}
-                e_tmps[name] = definition["class"](**filtered_kwargs).html
+            e_tmps = {}
+            for name, definition in CUI.registry.items():
+                if definition["type"] == "element":
+                    valid_params = definition["init_params"]
+                    filtered_kwargs = {p: None for p in valid_params if p != 'self'}
+                    e_tmps[name] = definition["class"](**filtered_kwargs).html
 
-        if e_tmps:
-            evaluate_js(f"window.cUIData.updateTemplates({json.dumps(e_tmps)})")
+            if e_tmps:
+                evaluate_js(f"window.cUIData.updateTemplates({json.dumps(e_tmps)})")
+
+            # A browser reload creates a new JavaScript window. Restore the
+            # helpers that hold pager state and layout behavior as well as CUI.
+            try:
+                evaluate_js(CardPager.pg_js())
+            except (NameError, AttributeError):
+                pass
+            try:
+                evaluate_js(VC_UI_JS)
+            except NameError:
+                pass
+
+            # Push dynamic rows and connection state back into the new page.
+            try:
+                update_all_ui()
+                update_token_table_rows()
+            except NameError:
+                pass
+        except Exception as e:
+            print(f"[VC Manager] Could not restore the custom UI after reload: {e}", type_="ERROR")
 
     if not getattr(socketio, "_is_multi_listener_patched", False):
         _orig_socketio_on = socketio.on
@@ -458,11 +657,10 @@ def vc_manager_farm_script():
 
     @socketio.on("connect")
     def vc_manager_cui_connect():
-        c_sid = request.sid
-
-        if c_sid != last_sid[0]:
-            reeval()
-            last_sid[0] = c_sid
+        # Some embedded browsers reuse a Socket.IO session during a page
+        # refresh. Reinstalling is idempotent and avoids leaving raw __CUI__
+        # placeholders visible when that happens.
+        reeval()
 
     vc_manager_cui_connect._vc_manager_socket_handler = True
 
@@ -577,7 +775,8 @@ def vc_manager_farm_script():
                 return
             evaluate_js("if (window.CUI_Pager) window.CUI_Pager.initPagers();")
 
-        def pg_js(self):
+        @staticmethod
+        def pg_js():
             return """
                 (function() {
                     if (window.CUI_Pager && window.CUI_Pager.observer) {
@@ -726,12 +925,13 @@ def vc_manager_farm_script():
 
                             parentCard.insertAdjacentHTML('afterbegin', newControlsHtml);
 
-                            const resizeObserver = new ResizeObserver(() => {
-                                const activePage = wrapper.querySelectorAll('.cui-page')[parseInt(wrapper.dataset.currentPage)];
-                                if (activePage) wrapper.style.height = `${activePage.scrollHeight}px`;
-                            });
-
-                            pages.forEach(p => resizeObserver.observe(p));
+                            if (typeof ResizeObserver === 'function') {
+                                const resizeObserver = new ResizeObserver(() => {
+                                    const activePage = wrapper.querySelectorAll('.cui-page')[parseInt(wrapper.dataset.currentPage)];
+                                    if (activePage) wrapper.style.height = `${activePage.scrollHeight}px`;
+                                });
+                                pages.forEach(p => resizeObserver.observe(p));
+                            }
                             this.updateControls(pagerId);
                         },
 
@@ -758,7 +958,8 @@ def vc_manager_farm_script():
 
                             if (targetPageEl) {
                                 targetPageEl.style.transform = `translateX(${100 * direction}%)`;
-                                requestAnimationFrame(() => {
+                                const animate = window.requestAnimationFrame || function(callback) { setTimeout(callback, 0); };
+                                animate(() => {
                                    targetPageEl.style.transform = 'translateX(0%)';
                                    targetPageEl.style.opacity = '1';
                                    targetPageEl.style.pointerEvents = 'auto';
@@ -792,9 +993,11 @@ def vc_manager_farm_script():
                         }
                     };
 
-                    const observer = new MutationObserver(window.CUI_Pager.initPagers);
-                    observer.observe(document.body, { childList: true, subtree: true });
-                    window.CUI_Pager.observer = observer;
+                    if (typeof MutationObserver === 'function' && (document.documentElement || document.body)) {
+                        const observer = new MutationObserver(window.CUI_Pager.initPagers);
+                        observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+                        window.CUI_Pager.observer = observer;
+                    }
                     window.CUI_Pager.initPagers();
                 })();
             """
@@ -803,6 +1006,12 @@ def vc_manager_farm_script():
 
     VC_UI_JS = """
     (function() {
+        const clearElement = function(element) {
+            if (!element) return;
+            if (typeof element.replaceChildren === 'function') element.replaceChildren();
+            else while (element.firstChild) element.removeChild(element.firstChild);
+        };
+
         // Remove the banner left in an already-open tab by pre-fix versions.
         const staleBanner = document.getElementById('vc_header_banner_root');
         if (staleBanner) {
@@ -818,7 +1027,11 @@ def vc_manager_farm_script():
         participantPager.pageSize = 3;
         participantPager.update = function(pagerId, rows) {
             const previous = this.states[pagerId] || { page: 0 };
-            previous.rows = Array.isArray(rows) ? rows : [];
+            const nextRows = Array.isArray(rows) ? rows : [];
+            const oldKey = (previous.rows || []).map(item => String(item.id || '')).join('|');
+            const newKey = nextRows.map(item => String(item.id || '')).join('|');
+            previous.rows = nextRows;
+            if (oldKey !== newKey) previous.page = 0;
             const totalPages = Math.max(1, Math.ceil(previous.rows.length / this.pageSize));
             previous.page = Math.min(Math.max(0, previous.page || 0), totalPages - 1);
             this.states[pagerId] = previous;
@@ -854,7 +1067,7 @@ def vc_manager_farm_script():
             next.style.opacity = next.disabled ? '0.4' : '1';
             prev.style.cursor = prev.disabled ? 'not-allowed' : 'pointer';
             next.style.cursor = next.disabled ? 'not-allowed' : 'pointer';
-            body.replaceChildren();
+            clearElement(body);
 
             const pageRows = rows.slice(state.page * this.pageSize, (state.page + 1) * this.pageSize);
             if (pageRows.length === 0) {
@@ -904,8 +1117,11 @@ def vc_manager_farm_script():
         managedPager.pageSize = 3;
         managedPager.update = function(pagerId, rows) {
             const previous = this.states[pagerId] || { page: 0 };
-            previous.rows = Array.isArray(rows) ? rows : [];
-            previous.page = 0;
+            const nextRows = Array.isArray(rows) ? rows : [];
+            const oldKey = (previous.rows || []).map(item => String(item.id || '')).join('|');
+            const newKey = nextRows.map(item => String(item.id || '')).join('|');
+            previous.rows = nextRows;
+            if (oldKey !== newKey) previous.page = 0;
             this.states[pagerId] = previous;
             this.render(pagerId);
         };
@@ -947,7 +1163,7 @@ def vc_manager_farm_script():
             next.style.opacity = next.disabled ? '0.4' : '1';
             prev.style.cursor = prev.disabled ? 'not-allowed' : 'pointer';
             next.style.cursor = next.disabled ? 'not-allowed' : 'pointer';
-            body.replaceChildren();
+            clearElement(body);
 
             const pageRows = rows.slice(state.page * this.pageSize, (state.page + 1) * this.pageSize);
             if (pageRows.length === 0) {
@@ -991,13 +1207,23 @@ def vc_manager_farm_script():
                 const channel = document.createElement('span');
                 channel.textContent = item.channel || '-';
                 channel.style.cssText = 'font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-                const status = document.createElement('span');
-                status.textContent = item.status || 'Idle';
-                status.style.cssText = 'font-size:13px;font-weight:600;';
+                const status = document.createElement('div');
+                status.style.cssText = 'display:flex;flex-direction:column;min-width:0;';
+                const statusLabel = document.createElement('span');
+                statusLabel.textContent = item.status || 'Idle';
+                statusLabel.style.cssText = 'font-size:13px;font-weight:600;';
+                status.appendChild(statusLabel);
+                if (item.error) {
+                    const statusError = document.createElement('span');
+                    statusError.textContent = item.error;
+                    statusError.title = item.error;
+                    statusError.style.cssText = 'font-size:10px;line-height:1.2;opacity:.68;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;';
+                    status.appendChild(statusError);
+                }
                 const action = document.createElement('button');
                 action.type = 'button';
-                action.textContent = 'Leave';
-                action.disabled = !item.connected;
+                action.textContent = item.connected ? 'Leave' : 'Remove';
+                action.disabled = item.removable === false;
                 action.style.cssText = 'border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;';
                 action.style.opacity = action.disabled ? '0.45' : '1';
                 action.style.cursor = action.disabled ? 'not-allowed' : 'pointer';
@@ -1091,7 +1317,7 @@ def vc_manager_farm_script():
 
                 const counters = Array.from(card.querySelectorAll('*')).filter(element =>
                     element.childElementCount === 0 &&
-                    /^(?:page\s*)?\d+\s*(?:\/|of)\s*\d+$/i.test(element.textContent.trim())
+                    /^(?:page\\s*)?\\d+\\s*(?:\\/|of)\\s*\\d+$/i.test(element.textContent.trim())
                 );
                 counters.forEach(counter => {
                     const controls = counter.parentElement;
@@ -1106,8 +1332,7 @@ def vc_manager_farm_script():
             });
         };
 
-        if (window.VCManagerLayoutObserver) window.VCManagerLayoutObserver.disconnect();
-        window.VCManagerLayoutObserver = new MutationObserver(() => {
+        window.VCManagerRefreshLayout = function() {
             window.styleParticipantIds();
             window.positionVCManagerTablePagers();
             window.sizeVCParticipantCard();
@@ -1117,8 +1342,18 @@ def vc_manager_farm_script():
                     window.VCManagedAccountsPager.render(root.id);
                 }
             });
-        });
-        window.VCManagerLayoutObserver.observe(document.body, { childList: true, subtree: true });
+        };
+
+        if (window.VCManagerLayoutObserver && typeof window.VCManagerLayoutObserver.disconnect === 'function') {
+            window.VCManagerLayoutObserver.disconnect();
+        }
+        if (window.VCManagerLayoutTimer) clearInterval(window.VCManagerLayoutTimer);
+        if (typeof MutationObserver === 'function' && (document.documentElement || document.body)) {
+            window.VCManagerLayoutObserver = new MutationObserver(window.VCManagerRefreshLayout);
+            window.VCManagerLayoutObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
+        } else {
+            window.VCManagerLayoutTimer = setInterval(window.VCManagerRefreshLayout, 1000);
+        }
 
         setTimeout(() => {
             window.styleParticipantIds();
@@ -1332,7 +1567,13 @@ def vc_manager_farm_script():
                             row.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px;';
                             const cName = s.channel_name || 'Channel';
                             const gName = s.guild_name || 'Server';
-                            const dur = s.duration_seconds ? (Math.round(s.duration_seconds) + 's') : 'N/A';
+                            const durationSeconds = Math.max(0, Math.round(Number(s.duration_seconds) || 0));
+                            const hours = Math.floor(durationSeconds / 3600);
+                            const minutes = Math.floor((durationSeconds % 3600) / 60);
+                            const seconds = durationSeconds % 60;
+                            const dur = hours > 0
+                                ? `${hours}h ${minutes}m ${seconds}s`
+                                : (minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`);
                             const date = s.start_time ? s.start_time.split('T')[0] : '';
                             row.innerHTML = '<div><div style="font-weight: 600; font-size: 13px;">#' + escapeHtml(cName) + '</div><div style="font-size: 11px;">' + escapeHtml(gName) + ' • ' + escapeHtml(date) + '</div></div><div style="background: rgba(255,255,255,0.06); font-weight: 700; font-size: 12px; padding: 3px 8px; border-radius: 6px;">' + escapeHtml(dur) + '</div>';
                             list.appendChild(row);
@@ -1355,6 +1596,11 @@ def vc_manager_farm_script():
 
     VC_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     TOKENS_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    file_lock = getattr(bot, "_vc_manager_file_lock", None)
+    if file_lock is None:
+        file_lock = threading.RLock()
+        bot._vc_manager_file_lock = file_lock
 
     def fresh_data():
         return {
@@ -1379,6 +1625,21 @@ def vc_manager_farm_script():
             }
         }
 
+    def backup_broken_file(path):
+        """Preserve an unreadable JSON file once per script generation."""
+        path_key = str(path)
+        if path_key in runtime_state["backed_up_files"] or not path.exists():
+            return None
+        runtime_state["backed_up_files"].add(path_key)
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = path.with_name(f"{path.name}.corrupt-{timestamp}.backup")
+            shutil.copy2(path, backup_path)
+            return backup_path
+        except Exception as backup_error:
+            print(f"[VC Manager] Could not back up broken file {path.name}: {backup_error}", type_="ERROR")
+            return None
+
     def load_data():
         try:
             if VC_DATA_PATH.exists():
@@ -1387,25 +1648,79 @@ def vc_manager_farm_script():
                     if not isinstance(data, dict):
                         raise ValueError("VC data root must be an object")
                     base = fresh_data()
-                    base["total_vc_time_seconds"] = float(data.get("total_vc_time_seconds", 0.0))
+                    total_seconds = float(data.get("total_vc_time_seconds", 0.0))
+                    base["total_vc_time_seconds"] = total_seconds if math.isfinite(total_seconds) and total_seconds >= 0 else 0.0
                     sessions = data.get("sessions", [])
-                    base["sessions"] = list(sessions) if isinstance(sessions, list) else []
+                    base["sessions"] = [item for item in sessions if isinstance(item, dict)][-500:] if isinstance(sessions, list) else []
                     if isinstance(data.get("settings"), dict):
-                        base["settings"].update(data["settings"])
+                        stored_settings = dict(data["settings"])
+                        stored_slash = stored_settings.pop("slash_responses", None)
+                        base["settings"].update(stored_settings)
+                        if isinstance(stored_slash, dict):
+                            base["settings"]["slash_responses"].update(stored_slash)
                     return base
             return fresh_data()
         except Exception as e:
             print(f"[VC Manager] Error loading data: {e}", type_="ERROR")
+            backup_path = backup_broken_file(VC_DATA_PATH)
+            if backup_path:
+                print(f"[VC Manager] Preserved the broken data file as {backup_path.name}.", type_="INFO")
             return fresh_data()
 
-    def save_data(data):
+    def write_json_file(path, data, label):
+        """Write JSON safely, including Windows hosts that briefly lock targets."""
+        tmp = None
         try:
-            tmp = VC_DATA_PATH.with_name(f"{VC_DATA_PATH.name}.{uuid.uuid4().hex}.tmp")
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-            os.replace(tmp, VC_DATA_PATH)
-        except Exception as e:
-            print(f"[VC Manager] Error saving data: {e}", type_="ERROR")
+            with file_lock:
+                tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+                with open(tmp, "w", encoding="utf-8", newline="\n") as file:
+                    json.dump(data, file, indent=4, ensure_ascii=False)
+                    file.flush()
+                    os.fsync(file.fileno())
+
+                last_error = None
+                for attempt in range(5):
+                    try:
+                        os.replace(tmp, path)
+                        return True
+                    except PermissionError as error:
+                        last_error = error
+                        if path.exists():
+                            try:
+                                os.chmod(path, 0o600)
+                            except OSError:
+                                pass
+                        time.sleep(0.08 * (attempt + 1))
+
+                # Antivirus, sync tools, and some Nighty builds can hold a
+                # replace-incompatible handle while still allowing an ordinary
+                # overwrite. Keep this fallback under the same process lock.
+                try:
+                    with open(path, "w", encoding="utf-8", newline="\n") as file:
+                        json.dump(data, file, indent=4, ensure_ascii=False)
+                        file.flush()
+                        os.fsync(file.fileno())
+                    return True
+                except Exception as overwrite_error:
+                    raise OSError(
+                        f"atomic replace failed ({last_error}); direct overwrite failed ({overwrite_error})"
+                    ) from overwrite_error
+        except Exception as error:
+            print(
+                f"[VC Manager] Error saving {label}: {error}. "
+                "Close any editor or sync tool using the JSON file, then try again.",
+                type_="ERROR"
+            )
+            return False
+        finally:
+            if tmp and tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+    def save_data(data):
+        return write_json_file(VC_DATA_PATH, data, "VC data")
 
     def load_tokens():
         try:
@@ -1418,22 +1733,24 @@ def vc_manager_farm_script():
             return {"tokens": []}
         except Exception as e:
             print(f"[VC Manager] Error loading tokens: {e}", type_="ERROR")
-            return {"tokens": []}
+            backup_path = backup_broken_file(TOKENS_DATA_PATH)
+            backup_note = f" A backup was saved as {backup_path.name}." if backup_path else ""
+            return {
+                "tokens": [],
+                "_load_error": (
+                    f"VC Manager could not read {TOKENS_DATA_PATH.name}. The file may contain broken JSON or Nighty may not have file access. "
+                    f"Fix or rename the file, then reload the script. VC Manager left the file untouched.{backup_note}"
+                )
+            }
 
     def save_tokens(data):
-        try:
-            tmp = TOKENS_DATA_PATH.with_name(f"{TOKENS_DATA_PATH.name}.{uuid.uuid4().hex}.tmp")
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-            os.replace(tmp, TOKENS_DATA_PATH)
-        except Exception as e:
-            print(f"[VC Manager] Error saving tokens: {e}", type_="ERROR")
+        return write_json_file(TOKENS_DATA_PATH, data, "tokens")
 
     # ==================== SCRIPT STATE ====================
 
     active_channel = None
-    reconnect_target = None
-    connection_start_time = None
+    reconnect_target = dict(previous_managed_target) if previous_managed_target else None
+    connection_start_time = previous_connection_start_time
     disconnect_task = None
     intentional_disconnect = False
     is_muted = False
@@ -1497,26 +1814,49 @@ def vc_manager_farm_script():
             return value.strip().lower() in ("1", "true", "yes", "on", "checked")
         return bool(value)
 
+    def timer_minutes(value):
+        try:
+            number = float(value or 0)
+            if not math.isfinite(number):
+                return 0
+            return max(0, min(120, int(number)))
+        except (TypeError, ValueError):
+            return 0
+
     def safe_create_task(coro):
         task = None
-        bot_loop = getattr(bot, "loop", None)
-        if bot_loop and bot_loop.is_running():
-            try:
-                task = bot_loop.create_task(coro)
-            except RuntimeError:
-                try:
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        try:
+            bot_loop = getattr(bot, "loop", None)
+        except Exception:
+            bot_loop = None
+
+        try:
+            if bot_loop and bot_loop.is_running():
+                if running_loop is bot_loop:
+                    task = bot_loop.create_task(coro)
+                else:
+                    # Nighty invokes CUI callbacks and script setup from worker
+                    # threads. Queue work onto the bot loop instead of creating
+                    # an asyncio Task from a thread that has no current loop.
                     task = asyncio.run_coroutine_threadsafe(coro, bot_loop)
-                except Exception:
-                    pass
+            elif running_loop and running_loop.is_running():
+                task = running_loop.create_task(coro)
+        except Exception as e:
+            print(f"[VC Manager] Could not schedule task: {e}", type_="ERROR")
+
         if task is None:
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(coro)
-            except RuntimeError as e:
-                if inspect.iscoroutine(coro):
-                    coro.close()
-                print(f"[VC Manager] No running event loop for task: {e}", type_="ERROR")
-                return None
+            if inspect.iscoroutine(coro):
+                coro.close()
+            print(
+                "[VC Manager] Nighty has no running async loop. Wait for Nighty to connect, then reload the script.",
+                type_="ERROR"
+            )
+            return None
 
         runtime_state["tasks"].add(task)
         if hasattr(task, "add_done_callback"):
@@ -1534,6 +1874,21 @@ def vc_manager_farm_script():
             print(f"[VC Manager] Could not close a stale token client: {e}", type_="ERROR")
 
     # ==================== MULTI-TOKEN CLIENT ====================
+
+    gateway_start_lock = None
+    gateway_last_start = 0.0
+
+    async def wait_for_gateway_start_slot():
+        """Space IDENTIFY sessions so several saved accounts do not connect at once."""
+        nonlocal gateway_start_lock, gateway_last_start
+        if gateway_start_lock is None:
+            gateway_start_lock = asyncio.Lock()
+        await gateway_start_lock.acquire()
+        delay = 5.25 - (time.monotonic() - gateway_last_start)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        gateway_last_start = time.monotonic()
+        return gateway_start_lock
 
     class GatewayVoiceClient:
         def __init__(self, token, name="Token"):
@@ -1554,27 +1909,178 @@ def vc_manager_farm_script():
             self.is_camera_on = False
             self.listener_task = None
             self.heartbeat_task = None
+            self.reconnect_task = None
             self._closing = False
+            self._starting = False
+            self._reconnect_attempts = 0
+            self._retry_delay = None
+            self._last_logged_error = ""
+            self._last_transport_error = ""
+            self.status = "Starting"
+            self.last_error = ""
+
+        def _refresh_row(self):
+            try:
+                if ui_refs:
+                    update_token_table_rows()
+            except (NameError, RuntimeError):
+                pass
+
+        def _set_status(self, status, error=""):
+            self.status = str(status or "Idle")
+            self.last_error = str(error or "")
+            if self.last_error and self.last_error != self._last_logged_error:
+                print(f"[VC Manager] {self.name}: {self.last_error}", type_="ERROR")
+                self._last_logged_error = self.last_error
+            elif not self.last_error and self.status in ("Ready", "Connected"):
+                self._last_logged_error = ""
+                self._last_transport_error = ""
+            self._refresh_row()
+
+        @staticmethod
+        def _normalise_close_code(close_code):
+            """Return aiohttp close enums and integers as a plain integer."""
+            value = getattr(close_code, "value", close_code)
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        @staticmethod
+        def _new_http_session():
+            """Create a session whose lifetime is not capped by an HTTP total timeout."""
+            timeout = aiohttp.ClientTimeout(
+                total=None,
+                sock_connect=20,
+                sock_read=None,
+            )
+            return aiohttp.ClientSession(timeout=timeout)
+
+        def _gateway_close_details(self, close_code):
+            close_code = self._normalise_close_code(close_code)
+            explanations = {
+                1006: (
+                    "Gateway reconnecting",
+                    "The connection to Discord ended unexpectedly (code 1006). VC Manager will open a fresh session.",
+                    True,
+                    5,
+                ),
+                4000: ("Gateway disconnected", "Discord reported an unknown gateway error. VC Manager will retry.", True, None),
+                4001: ("Gateway rejected", "Discord rejected a gateway operation. Reload the updated script before trying again.", False, None),
+                4002: ("Gateway rejected", "Discord could not decode a gateway payload. Reload the updated script before trying again.", False, None),
+                4003: ("Gateway reconnecting", "Discord received voice data before login completed. VC Manager will retry.", True, 8),
+                4004: ("Token rejected", "Discord rejected this token. Remove the account, copy a fresh token, and add it again.", False, None),
+                4005: ("Gateway reconnecting", "Discord detected a duplicate login attempt. VC Manager will retry after a cooldown.", True, 12),
+                4007: ("Gateway reconnecting", "Discord rejected the previous sequence. VC Manager will open a fresh session.", True, 8),
+                4008: ("Rate limited", "Discord rate-limited this account's gateway. VC Manager will wait one minute before retrying.", True, 60),
+                4009: ("Gateway reconnecting", "The Discord gateway session timed out. VC Manager will open a fresh session.", True, 8),
+                4010: ("Gateway rejected", "Discord rejected the gateway shard configuration. Reload the updated script.", False, None),
+                4011: ("Gateway rejected", "Discord requires sharding for this account session, which VC Manager cannot provide.", False, None),
+                4013: ("Gateway rejected", "Discord rejected the gateway intents. Reload the updated script.", False, None),
+                4014: ("Gateway rejected", "Discord disallowed the requested gateway intents. Reload the updated script.", False, None),
+            }
+            if close_code in explanations:
+                return explanations[close_code]
+            code_text = str(close_code) if close_code is not None else "unknown"
+            return (
+                "Gateway disconnected",
+                f"The Discord gateway closed with code {code_text}. VC Manager will retry with a fresh session.",
+                True,
+                None,
+            )
+
+        async def _channel_access_error(self, channel_id):
+            """Return a plain-language channel access error, or an empty string."""
+            try:
+                if self.http_session is None or self.http_session.closed:
+                    self.http_session = self._new_http_session()
+                url = f"https://discord.com/api/v10/channels/{int(channel_id)}"
+                headers = {"Authorization": self.token}
+                timeout = aiohttp.ClientTimeout(total=10)
+
+                for attempt in range(2):
+                    async with self.http_session.get(url, headers=headers, timeout=timeout) as response:
+                        if response.status == 200:
+                            return ""
+                        if response.status == 401:
+                            return "Discord rejected this token. Remove the account, copy a fresh token, and add it again."
+                        if response.status == 403:
+                            return "This account cannot open the selected voice channel. Check View Channel and Connect permissions for its roles."
+                        if response.status == 404:
+                            return "This account cannot find the selected channel. Make sure it is still in the server and can see the channel."
+                        if response.status == 429:
+                            retry_after = 1.0
+                            try:
+                                payload = await response.json(content_type=None)
+                                retry_after = min(max(float(payload.get("retry_after", 1.0)), 0.25), 3.0)
+                            except Exception:
+                                pass
+                            if attempt == 0:
+                                await asyncio.sleep(retry_after)
+                                continue
+                            return "Discord rate-limited this account. Wait a minute, then press Join All again."
+                        return f"Discord returned HTTP {response.status} while checking channel access. Try again after restarting Nighty."
+            except TimeoutError:
+                return "Discord did not answer the channel check. Check your connection and try again."
+            except Exception as e:
+                print(f"[VC Manager] Could not check channel access for {self.name}: {e}", type_="ERROR")
+                return "The channel check failed. Open the Nighty console for the technical error."
+            return ""
 
         async def start_gateway(self):
             if self.ws and not self.ws.closed:
                 return True
+            if self._starting:
+                for _ in range(150):
+                    await asyncio.sleep(0.1)
+                    if self.ws and not self.ws.closed:
+                        return True
+                    if not self._starting:
+                        break
+                return bool(self.ws and not self.ws.closed)
+            self._starting = True
+            start_lock = None
             try:
+                self._closing = False
+                self._set_status("Connecting")
                 if self.http_session is None or self.http_session.closed:
-                    self.http_session = aiohttp.ClientSession()
+                    self.http_session = self._new_http_session()
                 self.session_id = None
                 self.user_id = None
                 self.sequence = None
-                self.ws = await self.http_session.ws_connect("wss://gateway.discord.gg/?v=9&encoding=json")
+                start_lock = await wait_for_gateway_start_slot()
+                # Discord supplies its own opcode heartbeat after HELLO. Keep
+                # aiohttp's separate WebSocket ping timer disabled with None;
+                # zero can schedule an immediate ping and immediate timeout.
+                # Also avoid a numeric ws_connect timeout because supported
+                # aiohttp builds treat it as a receive timeout. Limit only the
+                # opening handshake with asyncio.wait_for instead.
+                self.ws = await asyncio.wait_for(
+                    self.http_session.ws_connect(
+                        "wss://gateway.discord.gg/?v=10&encoding=json",
+                        heartbeat=None,
+                        autoclose=True,
+                        autoping=True,
+                    ),
+                    timeout=20,
+                )
                 self.listener_task = safe_create_task(self._gateway_loop())
-                return self.listener_task is not None
+                if self.listener_task is None:
+                    self._set_status("Gateway failed", "Nighty could not start the account gateway task. Restart Nighty and try again.")
+                    return False
+                return True
             except Exception as e:
                 print(f"[VC Manager] Gateway connect failed for {self.name}: {e}", type_="ERROR")
+                self._set_status("Gateway failed", "Could not reach Discord. Check your connection, VPN, or firewall, then try again.")
                 if self.http_session and not self.http_session.closed:
                     await self.http_session.close()
                 self.http_session = None
                 self.ws = None
                 return False
+            finally:
+                if start_lock and start_lock.locked():
+                    start_lock.release()
+                self._starting = False
 
         async def _heartbeat(self, interval):
             try:
@@ -1588,6 +2094,7 @@ def vc_manager_farm_script():
                 pass
 
         async def _gateway_loop(self):
+            should_reconnect = True
             try:
                 async for msg in self.ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
@@ -1628,8 +2135,8 @@ def vc_manager_farm_script():
                             elif self.user_id:
                                 avatar_index = (int(self.user_id) >> 22) % 6
                                 self.avatar_url = f"https://cdn.discordapp.com/embed/avatars/{avatar_index}.png"
-                            if ui_refs:
-                                update_token_table_rows()
+                            self._reconnect_attempts = 0
+                            self._set_status("Ready")
                         elif t == "VOICE_STATE_UPDATE":
                             if self.user_id and str(d.get("user_id")) == self.user_id:
                                 channel_id = d.get("channel_id")
@@ -1640,43 +2147,99 @@ def vc_manager_farm_script():
                                 if not channel_id:
                                     self.is_streaming = False
                                     self.is_camera_on = False
-                                if ui_refs:
-                                    update_token_table_rows()
-                        elif op in (7, 9):
+                                    self._set_status("Ready")
+                                else:
+                                    self._set_status("Connected")
+                        elif op == 7:
+                            self._set_status("Reconnecting")
                             await self.ws.close()
+                        elif op == 9:
+                            self._retry_delay = 8
+                            self._set_status("Reconnecting")
+                            await self.ws.close()
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+                        close_code = getattr(self.ws, "close_code", None)
+                        status, message, should_reconnect, retry_delay = self._gateway_close_details(close_code)
+                        self._retry_delay = retry_delay
+                        if close_code or not self._closing:
+                            self._set_status(status, message)
+                        break
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        close_code = getattr(self.ws, "close_code", None)
+                        close_code_value = self._normalise_close_code(close_code)
+                        exception = self.ws.exception() if self.ws else None
+                        status, message, should_reconnect, retry_delay = self._gateway_close_details(close_code)
+                        self._retry_delay = retry_delay
+                        if exception:
+                            exception_text = str(exception).strip() or "no additional details"
+                            code_text = close_code_value if close_code_value is not None else "unknown"
+                            transport_error = (
+                                f"{type(exception).__name__}: {exception_text} "
+                                f"(close code {code_text})"
+                            )
+                            if transport_error != self._last_transport_error:
+                                print(
+                                    f"[VC Manager] {self.name} gateway transport error: {transport_error}",
+                                    type_="ERROR"
+                                )
+                                self._last_transport_error = transport_error
+                        self._set_status(status, message)
+                        break
+            except asyncio.CancelledError:
+                should_reconnect = False
+                raise
             except Exception as e:
                 print(f"[VC Manager] Gateway loop terminated for {self.name}: {e}", type_="ERROR")
+                if not self.last_error:
+                    self._set_status("Gateway failed", "The account lost its Discord connection. VC Manager will retry it.")
             finally:
                 self.is_in_vc = False
                 self.current_channel_id = None
                 self.current_guild_id = None
                 if self.heartbeat_task and not self.heartbeat_task.done():
                     self.heartbeat_task.cancel()
-                if ui_refs:
-                    update_token_table_rows()
-                if not self._closing:
+                self._refresh_row()
+                if not self._closing and should_reconnect:
+                    self._reconnect_attempts += 1
+                    delay = self._retry_delay or min(5 * self._reconnect_attempts, 60)
+                    self._retry_delay = None
                     async def reconnect_later():
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(delay)
+                        if self._closing:
+                            return
                         await self.start_gateway()
-                    safe_create_task(reconnect_later())
+                    self.reconnect_task = safe_create_task(reconnect_later())
 
         async def join_vc(self, guild_id, channel_id, mute=False, deaf=False, stream=False, video=False):
             if not await self.start_gateway():
                 return False
-            for _ in range(50):
-                if self.ws and not self.ws.closed and self.user_id:
+            for _ in range(120):
+                if self.user_id and self.ws and not self.ws.closed:
+                    break
+                if self.status == "Token rejected" or (self.ws and self.ws.closed):
                     break
                 await asyncio.sleep(0.1)
 
+            if not self.user_id and not self.last_error:
+                self._set_status(
+                    "Login timed out",
+                    "Discord did not finish signing this account in. Check the token, account verification, VPN, and firewall."
+                )
+
             if not self.ws or self.ws.closed or not self.user_id:
+                if not self.last_error:
+                    self._set_status("Login failed", "The account gateway closed before Discord confirmed the login. Add the account again with a fresh token.")
                 return False
+
+            if self.is_in_vc and self.current_channel_id == str(channel_id):
+                self._set_status("Connected")
+                return True
 
             self.is_muted = bool(mute)
             self.is_deafened = bool(deaf)
             self.is_streaming = bool(stream)
             self.is_camera_on = bool(video)
-            self.current_guild_id = str(guild_id)
-            self.current_channel_id = str(channel_id) if channel_id else None
+            self._set_status("Joining")
 
             payload = {
                 "op": 4,
@@ -1688,41 +2251,73 @@ def vc_manager_farm_script():
                     "self_video": self.is_camera_on
                 }
             }
-            await self.ws.send_json(payload)
-            for _ in range(30):
+            try:
+                await self.ws.send_json(payload)
+            except Exception as e:
+                print(f"[VC Manager] Voice join packet failed for {self.name}: {e}", type_="ERROR")
+                self._set_status("Join failed", "Could not send the voice join request. Reconnect the account and try again.")
+                return False
+
+            # Discord can take several seconds to dispatch the account's own
+            # VOICE_STATE_UPDATE when several tokens connect at once.
+            for _ in range(60):
                 if self.is_in_vc and self.current_channel_id == str(channel_id):
                     if self.is_streaming:
-                        await self.ws.send_json({
-                            "op": 18,
-                            "d": {
-                                "type": "guild",
-                                "guild_id": str(guild_id),
-                                "channel_id": str(channel_id),
-                                "preferred_region": None
-                            }
-                        })
+                        try:
+                            await self.ws.send_json({
+                                "op": 18,
+                                "d": {
+                                    "type": "guild",
+                                    "guild_id": str(guild_id),
+                                    "channel_id": str(channel_id),
+                                    "preferred_region": None
+                                }
+                            })
+                        except Exception as e:
+                            print(f"[VC Manager] Stream-state request failed for {self.name}: {e}", type_="ERROR")
+                    self._set_status("Connected")
                     return True
-                await asyncio.sleep(0.1)
+                if not self.ws or self.ws.closed:
+                    break
+                await asyncio.sleep(0.2)
+
+            access_error = await self._channel_access_error(channel_id)
             self.current_channel_id = None
             self.current_guild_id = None
+            self.is_in_vc = False
+            self._set_status(
+                "Join failed",
+                access_error or (
+                    "Discord did not confirm the join. Check that this account is in the server, can view the channel, "
+                    "has Connect permission, is not timed out, and does not need phone or email verification."
+                )
+            )
             return False
 
         async def leave_vc(self):
             if not self.current_guild_id or not self.ws or self.ws.closed:
+                if self.user_id:
+                    self._set_status("Ready")
                 return False
-            await self.ws.send_json({
-                "op": 4,
-                "d": {
-                    "guild_id": str(self.current_guild_id),
-                    "channel_id": None,
-                    "self_mute": False,
-                    "self_deaf": False,
-                    "self_video": False
-                }
-            })
+            try:
+                await self.ws.send_json({
+                    "op": 4,
+                    "d": {
+                        "guild_id": str(self.current_guild_id),
+                        "channel_id": None,
+                        "self_mute": False,
+                        "self_deaf": False,
+                        "self_video": False
+                    }
+                })
+            except Exception as e:
+                print(f"[VC Manager] Voice leave packet failed for {self.name}: {e}", type_="ERROR")
+                self._set_status("Leave failed", "Could not send the disconnect request. Restart Nighty if the account still appears connected.")
+                return False
             self.is_in_vc = False
             self.current_channel_id = None
             self.current_guild_id = None
+            self._set_status("Ready")
             return True
 
         async def close(self):
@@ -1733,14 +2328,20 @@ def vc_manager_farm_script():
                 self.heartbeat_task.cancel()
             if self.listener_task:
                 self.listener_task.cancel()
+            if self.reconnect_task:
+                self.reconnect_task.cancel()
             if self.ws and not self.ws.closed:
                 await self.ws.close()
             if self.http_session and not self.http_session.closed:
                 await self.http_session.close()
             self.http_session = None
+            self.status = "Closed"
 
     def init_token_clients():
         data = load_tokens()
+        if data.get("_load_error"):
+            print(f"[VC Manager] {data['_load_error']}", type_="ERROR")
+            return
         current_ids = set()
         for idx, item in enumerate(data.get("tokens", [])):
             if not isinstance(item, dict):
@@ -1768,7 +2369,8 @@ def vc_manager_farm_script():
                 safe_create_task(token_clients[tid].close())
                 del token_clients[tid]
 
-        save_tokens(data)
+        if not save_tokens(data):
+            print("[VC Manager] Managed account IDs could not be saved. Existing token data was not replaced.", type_="ERROR")
 
     # ==================== VOICE STATE HELPERS ====================
 
@@ -1784,6 +2386,12 @@ def vc_manager_farm_script():
                 "channel_name": str(channel_name or "Voice Channel")
             }
         runtime_state["managed_target"] = managed_target
+
+    def set_connection_start(value):
+        """Keep the live session clock available across Nighty hot reloads."""
+        nonlocal connection_start_time
+        connection_start_time = value
+        runtime_state["connection_start_time"] = value
 
     def get_current_voice_channel():
         """Return only the channel explicitly connected by VC Manager."""
@@ -2080,7 +2688,6 @@ def vc_manager_farm_script():
         except Exception as e:
             print(f"[VC Manager] Error sending voice state: {e}", type_="ERROR")
             return False
-        return False
 
     async def update_voice_state(mute=None, deaf=None, stream=None, video=None):
         nonlocal is_muted, is_deafened, is_streaming, is_camera_on
@@ -2140,7 +2747,7 @@ def vc_manager_farm_script():
         return sent
 
     async def disconnect_from_voice(intentional=True):
-        nonlocal intentional_disconnect, active_channel, connection_start_time
+        nonlocal intentional_disconnect, active_channel
         intentional_disconnect = intentional
         sent = False
         cached_channel = active_channel
@@ -2151,20 +2758,25 @@ def vc_manager_farm_script():
             target_guild_id = str((managed_target or {}).get("guild_id") or "")
             if not target_guild_id:
                 return False
+            # Clear the clock before yielding so the voice-state event cannot
+            # record the same session while this coroutine also finalizes it.
+            set_connection_start(None)
             sent = await send_voice_state(target_guild_id, None)
             if sent:
                 record_session(channel, started_at)
                 active_channel = None
-                connection_start_time = None
                 set_managed_target()
                 if ui_refs:
                     update_all_ui()
+            else:
+                set_connection_start(started_at)
         except Exception as e:
+            set_connection_start(started_at)
             print(f"[VC Manager] Disconnect failed: {e}", type_="ERROR")
         return sent
 
     async def sync_voice_state(update_ui=True):
-        nonlocal active_channel, reconnect_target, connection_start_time
+        nonlocal active_channel, reconnect_target
         current = get_current_voice_channel()
         if current:
             active_channel = current
@@ -2174,10 +2786,10 @@ def vc_manager_farm_script():
                 "channel_name": current.name
             }
             if connection_start_time is None:
-                connection_start_time = datetime.now()
+                set_connection_start(datetime.now())
         else:
             active_channel = None
-            connection_start_time = None
+            set_connection_start(None)
 
         if update_ui and ui_refs:
             update_all_ui()
@@ -2211,7 +2823,7 @@ def vc_manager_farm_script():
 
     @bot.listen("on_voice_state_update")
     async def handle_voice_state_update(member, before, after):
-        nonlocal active_channel, connection_start_time, reconnect_target, intentional_disconnect
+        nonlocal active_channel, reconnect_target, intentional_disconnect
         nonlocal is_muted, is_deafened, is_streaming, is_camera_on
 
         bot_user = getattr(bot, "user", None)
@@ -2238,7 +2850,7 @@ def vc_manager_farm_script():
                 if old_channel and str(old_channel.id) == target_channel_id:
                     record_session(old_channel, connection_start_time)
                 active_channel = None
-                connection_start_time = None
+                set_connection_start(None)
                 set_managed_target()
                 update_all_ui()
                 return
@@ -2248,7 +2860,7 @@ def vc_manager_farm_script():
                 record_session(old_channel or active_channel, connection_start_time)
 
                 active_channel = None
-                connection_start_time = None
+                set_connection_start(None)
 
                 # Auto reconnect check
                 if not intentional_disconnect and is_auto_reconnect and reconnect_target:
@@ -2269,7 +2881,7 @@ def vc_manager_farm_script():
             if new_channel:
                 if old_channel and old_channel.id != new_channel.id and connection_start_time:
                     record_session(old_channel, connection_start_time)
-                    connection_start_time = datetime.now()
+                    set_connection_start(datetime.now())
                 active_channel = new_channel
                 reconnect_target = {
                     "guild_id": str(new_channel.guild.id),
@@ -2277,7 +2889,7 @@ def vc_manager_farm_script():
                     "channel_name": new_channel.name
                 }
                 if connection_start_time is None:
-                    connection_start_time = datetime.now()
+                    set_connection_start(datetime.now())
                     saved_minutes = load_data().get("settings", {}).get("auto_disconnect_minutes")
                     if saved_minutes:
                         await schedule_disconnect(saved_minutes)
@@ -2318,6 +2930,8 @@ def vc_manager_farm_script():
         # Update participants table if related to active channel
         if (before and before.channel and before.channel.id == cur.id) or (after and after.channel and after.channel.id == cur.id):
             update_participants_table()
+
+    runtime_state["listeners"].append(("on_voice_state_update", handle_voice_state_update))
 
     # ==================== NIGHTY SLASH API + COMPONENTS V2 ====================
 
@@ -2363,7 +2977,7 @@ def vc_manager_farm_script():
         if isinstance(stored, dict):
             for key in defaults:
                 if key in stored:
-                    defaults[key] = bool(stored[key])
+                    defaults[key] = as_bool(stored[key])
         return defaults
 
     def save_slash_response_settings(settings):
@@ -2377,6 +2991,11 @@ def vc_manager_farm_script():
 
     def slash_theme_layout(content):
         """Build Discord Components V2 using nes's Nighty V2 theme schema."""
+        def limited_text(value):
+            value = str(value or "")
+            return value if len(value) <= 3900 else value[:3897] + "..."
+
+        content = limited_text(content)
         theme_data = {}
         if get_slash_response_settings()["use_theme"]:
             try:
@@ -2403,7 +3022,7 @@ def vc_manager_farm_script():
             if "text" in layout_item:
                 value = str(layout_item.get("text") or "")
                 injected = injected or "{content}" in value
-                children.append({"type": 10, "content": value.replace("{content}", content)})
+                children.append({"type": 10, "content": limited_text(value.replace("{content}", content))})
             elif "section" in layout_item and isinstance(layout_item["section"], dict):
                 section = layout_item["section"]
                 value = str(section.get("text") or "")
@@ -2412,11 +3031,11 @@ def vc_manager_farm_script():
                 if thumbnail.startswith(("https://", "http://")):
                     children.append({
                         "type": 9,
-                        "components": [{"type": 10, "content": value.replace("{content}", content)}],
+                        "components": [{"type": 10, "content": limited_text(value.replace("{content}", content))}],
                         "accessory": {"type": 11, "media": {"url": thumbnail}}
                     })
                 else:
-                    children.append({"type": 10, "content": value.replace("{content}", content)})
+                    children.append({"type": 10, "content": limited_text(value.replace("{content}", content))})
             elif "image" in layout_item:
                 image_url = str(layout_item.get("image") or "").strip()
                 if image_url.startswith(("https://", "http://")):
@@ -2446,16 +3065,15 @@ def vc_manager_farm_script():
             return getattr(self.interaction, "user", None)
 
         async def _fallback_embed(self, title, description, ephemeral=True):
-            if discord_api is None:
-                return None
-            embed = discord_api.Embed(title=title, description=description, color=0x5865F2)
+            content = f"**{title}**\n{description}" if title else description
+            content = content.replace("@", "@\u200b")
             response = getattr(self.interaction, "response", None)
             if response and not response.is_done():
                 self._done = True
-                return await response.send_message(embed=embed, ephemeral=ephemeral)
+                return await response.send_message(content=content[:2000], ephemeral=ephemeral)
             followup = getattr(self.interaction, "followup", None)
             if followup:
-                return await followup.send(embed=embed, ephemeral=ephemeral)
+                return await followup.send(content=content[:2000], ephemeral=ephemeral)
             return None
 
         async def send_v2(self, title, description, ephemeral=None):
@@ -2469,7 +3087,8 @@ def vc_manager_farm_script():
                     "type": 4,
                     "data": {
                         "flags": COMPONENTS_V2_FLAG | (EPHEMERAL_FLAG if ephemeral else 0),
-                        "components": slash_theme_layout(content)
+                        "components": slash_theme_layout(content),
+                        "allowed_mentions": {"parse": []}
                     }
                 }
                 url = f"https://discord.com/api/v10/interactions/{interaction_id}/{interaction_token}/callback"
@@ -2504,7 +3123,10 @@ def vc_manager_farm_script():
             try:
                 timeout = aiohttp.ClientTimeout(total=10)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.patch(url, json={"components": slash_theme_layout(content)}) as response:
+                    async with session.patch(
+                        url,
+                        json={"components": slash_theme_layout(content), "allowed_mentions": {"parse": []}}
+                    ) as response:
                         if response.status == 200:
                             return True
                         detail = (await response.text())[:300]
@@ -2684,17 +3306,31 @@ def vc_manager_farm_script():
         await ctx.error("Only the Nighty account owner can control VC Manager.")
         return False
 
-    def find_voice_channel(query):
+    def is_voice_channel(channel):
+        if not channel or not getattr(channel, "guild", None):
+            return False
+        channel_type = str(getattr(channel, "type", "")).lower()
+        return "voice" in channel_type or "stage" in channel_type or hasattr(channel, "bitrate")
+
+    def find_voice_channel(query, preferred_guild=None):
         query = str(query or "").strip()
         if query.isdigit():
             channel = bot.get_channel(int(query))
-            if channel:
+            if is_voice_channel(channel):
                 return channel
-        for guild in getattr(bot, "guilds", []):
+        guilds = list(getattr(bot, "guilds", []))
+        if preferred_guild in guilds:
+            guilds.remove(preferred_guild)
+            guilds.insert(0, preferred_guild)
+        candidates = []
+        for guild in guilds:
             for channel in list(getattr(guild, "voice_channels", [])) + list(getattr(guild, "stage_channels", [])):
-                if query.lower() in str(getattr(channel, "name", "")).lower():
+                channel_name = str(getattr(channel, "name", ""))
+                if channel_name.casefold() == query.casefold():
                     return channel
-        return None
+                if query.casefold() in channel_name.casefold():
+                    candidates.append(channel)
+        return candidates[0] if len(candidates) == 1 else None
 
     if vc_group:
         @vc_group.command(
@@ -2705,7 +3341,7 @@ def vc_manager_farm_script():
         async def slash_vc_join(ctx, channel: str):
             if not await slash_owner_only(ctx):
                 return
-            target = find_voice_channel(channel)
+            target = find_voice_channel(channel, getattr(ctx.interaction, "guild", None))
             if not target or not getattr(target, "guild", None):
                 return await ctx.error(f"Could not find voice channel `{channel}`.")
             await ctx.send_v2("VC Manager", f"Connecting to **#{target.name}** in **{target.guild.name}**...")
@@ -2741,7 +3377,7 @@ def vc_manager_farm_script():
                 return await ctx.edit_v2("Connection Failed", "Discord rejected the voice join request.")
 
             joined = False
-            for _ in range(20):
+            for _ in range(100):
                 current = get_current_voice_channel()
                 if current and str(current.id) == str(target.id):
                     joined = True
@@ -3124,7 +3760,7 @@ def vc_manager_farm_script():
     )
 
     automation_page.create_ui_element(UI.Space, height="20px")
-    pending_timer_minutes = int(load_data().get("settings", {}).get("auto_disconnect_minutes") or 0)
+    pending_timer_minutes = timer_minutes(load_data().get("settings", {}).get("auto_disconnect_minutes"))
 
     def handle_timer_slider(value):
         nonlocal pending_timer_minutes
@@ -3307,6 +3943,18 @@ def vc_manager_farm_script():
     def update_token_table_rows():
         data = load_tokens()
         rows = []
+        if data.get("_load_error"):
+            rows.append({
+                "id": "storage-error",
+                "account_id": "-",
+                "name": "Token file error",
+                "avatar_url": "",
+                "channel": "-",
+                "status": "Not loaded",
+                "error": data["_load_error"],
+                "connected": False,
+                "removable": False
+            })
         for item in data.get("tokens", []):
             if not isinstance(item, dict):
                 continue
@@ -3315,7 +3963,8 @@ def vc_manager_farm_script():
             client = token_clients.get(tid)
 
             in_vc = client.is_in_vc if client else False
-            status_text = "Connected" if in_vc else "Idle"
+            status_text = "Connected" if in_vc else (getattr(client, "status", "Idle") if client else "Not loaded")
+            error_text = getattr(client, "last_error", "") if client else "Nighty did not create a gateway client for this saved account. Remove it and add it again."
             ch_info = "-"
             if client and client.current_channel_id:
                 channel = bot.get_channel(int(client.current_channel_id))
@@ -3328,7 +3977,9 @@ def vc_manager_farm_script():
                 "avatar_url": getattr(client, "avatar_url", "") if client else "",
                 "channel": ch_info,
                 "status": status_text,
-                "connected": in_vc
+                "error": error_text,
+                "connected": in_vc,
+                "removable": True
             })
         evaluate_js(
             f"if (window.VCManagedAccountsPager) "
@@ -3468,7 +4119,7 @@ def vc_manager_farm_script():
 
             # 1. Check cached channel
             channel = bot.get_channel(ch_int)
-            if channel:
+            if is_voice_channel(channel):
                 guild_id = str(channel.guild.id)
                 ch_name = channel.name
 
@@ -3476,7 +4127,7 @@ def vc_manager_farm_script():
             if not guild_id:
                 for g in getattr(bot, "guilds", []):
                     c = g.get_channel(ch_int)
-                    if c:
+                    if is_voice_channel(c):
                         guild_id = str(g.id)
                         ch_name = c.name
                         break
@@ -3485,14 +4136,14 @@ def vc_manager_farm_script():
             if not guild_id:
                 try:
                     c = await bot.fetch_channel(ch_int)
-                    if c and hasattr(c, "guild"):
+                    if is_voice_channel(c):
                         guild_id = str(c.guild.id)
                         ch_name = c.name
                 except Exception:
                     pass
 
             # 4. A selected guild is the final fallback for uncached channels.
-            if not guild_id:
+            if not guild_id and not direct_id:
                 selected_guild = selected_item_id(ui_refs["server_select"].selected_items)
                 if selected_guild not in ("", "none", "loading", "error"):
                     guild_id = selected_guild
@@ -3634,8 +4285,8 @@ def vc_manager_farm_script():
             return
 
         tab.channelinfomodal(
-            channel_name=cur.name,
-            guild_name=cur.guild.name,
+            channel_name=html_escape(str(cur.name)),
+            guild_name=html_escape(str(cur.guild.name)),
             channel_id=str(cur.id),
             bitrate=f"{int(getattr(cur, 'bitrate', 64000) / 1000)} kbps",
             user_limit=str(cur.user_limit) if getattr(cur, 'user_limit', 0) > 0 else "Unlimited",
@@ -3647,11 +4298,16 @@ def vc_manager_farm_script():
     def handle_open_history():
         data = load_data()
         sessions = data.get("sessions", [])
-        total_time = format_duration(data.get("total_vc_time_seconds", 0))
+        live_seconds = (
+            (datetime.now() - connection_start_time).total_seconds()
+            if connection_start_time and is_actually_connected() else 0
+        )
+        total_time = format_duration(data.get("total_vc_time_seconds", 0) + live_seconds)
 
         def clear_sessions():
-            data["sessions"] = []
-            save_data(data)
+            current_data = load_data()
+            current_data["sessions"] = []
+            save_data(current_data)
             tab.toast("Success", "Session history cleared", "SUCCESS")
 
         tab.sessionhistorymodal(
@@ -3704,31 +4360,59 @@ def vc_manager_farm_script():
     async def handle_add_token():
         add_token_btn.loading = True
         try:
-            tok = (ui_refs["token_input"].value or "").strip()
+            tok = (ui_refs["token_input"].value or "").strip().strip('"').strip("'").strip()
             name = (ui_refs["token_name_input"].value or "").strip() or f"Token #{len(token_clients)+1}"
 
             if not tok:
-                tab.toast("Error", "Please enter a valid Discord user token", "ERROR")
+                tab.toast("Token missing", "Paste the account token before pressing Add Account.", "ERROR")
+                return
+            if any(character.isspace() for character in tok):
+                tab.toast("Token has spaces", "Copy the raw token only. Remove quotes, labels, and spaces.", "ERROR")
                 return
 
             data = load_tokens()
+            if data.get("_load_error"):
+                tab.toast("Token file is broken", data["_load_error"], "ERROR")
+                return
             if any(isinstance(item, dict) and str(item.get("token", "")).strip() == tok for item in data.get("tokens", [])):
-                tab.toast("Error", "That account token is already managed", "ERROR")
+                tab.toast("Account already added", "This exact token already exists in Managed Accounts.", "ERROR")
                 return
             new_id = str(uuid.uuid4())
             data["tokens"].append({"id": new_id, "token": tok, "name": name})
-            save_tokens(data)
+            if not save_tokens(data):
+                tab.toast("Could not save account", f"Nighty could not write {TOKENS_DATA_PATH.name}. Check folder permissions and free disk space.", "ERROR")
+                return
 
             client = GatewayVoiceClient(tok, name=name)
             token_clients[new_id] = client
-            safe_create_task(client.start_gateway())
+            started = await client.start_gateway()
+            if started:
+                for _ in range(120):
+                    if client.user_id and client.ws and not client.ws.closed:
+                        break
+                    if client.status == "Token rejected" or (client.ws and client.ws.closed):
+                        break
+                    await asyncio.sleep(0.1)
+                if not client.user_id and not client.last_error:
+                    client._set_status(
+                        "Login timed out",
+                        "Discord did not finish signing this account in. Check the token, account verification, VPN, and firewall."
+                    )
 
             ui_refs["token_input"].value = ""
             ui_refs["token_name_input"].value = ""
             update_token_table_rows()
-            tab.toast("Success", f"Account '{name}' added", "SUCCESS")
+            if client.user_id:
+                tab.toast("Account added", f"{name} signed in and is ready to join.", "SUCCESS")
+            else:
+                tab.toast(
+                    "Account saved, login failed",
+                    client.last_error or "Discord did not accept the account session. Remove it and add a fresh token.",
+                    "ERROR"
+                )
         except Exception as e:
-            tab.toast("Error", f"Failed to add token: {e}", "ERROR")
+            print(f"[VC Manager] Could not add managed account: {e}", type_="ERROR")
+            tab.toast("Could not add account", "Nighty hit an internal error. Open the Nighty console for the technical details.", "ERROR")
         finally:
             add_token_btn.loading = False
 
@@ -3737,46 +4421,112 @@ def vc_manager_farm_script():
         try:
             cur = get_current_voice_channel()
             if not cur:
-                tab.toast("Error", "Connect the main bot to a voice channel first", "ERROR")
+                tab.toast("Main account is not connected", "Join a voice channel with VC Manager, then press Join All again.", "ERROR")
                 return
 
-            count = 0
-            for client in token_clients.values():
-                if await client.join_vc(cur.guild.id, cur.id):
-                    count += 1
+            clients = list(token_clients.values())
+            if not clients:
+                tab.toast("No managed accounts", "Add at least one account before pressing Join All.", "ERROR")
+                return
+
+            results = await asyncio.gather(
+                *(client.join_vc(cur.guild.id, cur.id) for client in clients),
+                return_exceptions=True
+            )
+            connected = 0
+            failures = []
+            for client, result in zip(clients, results):
+                if result is True:
+                    connected += 1
+                    continue
+                if isinstance(result, Exception):
+                    print(f"[VC Manager] Join All failed for {client.name}: {result}", type_="ERROR")
+                    client._set_status("Join failed", "Nighty hit an internal error for this account. Open the Nighty console for details.")
+                failures.append((client.name, client.last_error or "Discord did not confirm the voice join."))
 
             update_token_table_rows()
-            tab.toast("Success", f"Connected {count} token accounts to #{cur.name}", "SUCCESS")
+            if connected == len(clients):
+                tab.toast("Accounts connected", f"All {connected} managed accounts joined #{cur.name}.", "SUCCESS")
+            else:
+                first_name, first_error = failures[0]
+                remaining = len(failures) - 1
+                suffix = f" Check Managed Accounts for {remaining} more error{'s' if remaining != 1 else ''}." if remaining else ""
+                if connected:
+                    tab.toast(
+                        "Some accounts did not join",
+                        f"{connected} of {len(clients)} joined. {first_name}: {first_error}{suffix}",
+                        "ERROR"
+                    )
+                else:
+                    tab.toast(
+                        "No accounts joined",
+                        f"{first_name}: {first_error}{suffix}",
+                        "ERROR"
+                    )
         except Exception as e:
-            tab.toast("Error", f"Join all failed: {e}", "ERROR")
+            print(f"[VC Manager] Join All stopped: {e}", type_="ERROR")
+            tab.toast("Join All stopped", "Nighty hit an internal error. Open the Nighty console for the technical details.", "ERROR")
         finally:
             conn_all_btn.loading = False
 
     async def handle_disc_all_tokens():
         disc_all_btn.loading = True
         try:
-            count = 0
-            for client in token_clients.values():
-                if await client.leave_vc():
-                    count += 1
+            connected_clients = [client for client in token_clients.values() if client.is_in_vc]
+            if not connected_clients:
+                tab.toast("Nothing to disconnect", "No managed account is connected to a voice channel.", "ERROR")
+                return
+            results = await asyncio.gather(
+                *(client.leave_vc() for client in connected_clients),
+                return_exceptions=True
+            )
+            count = sum(result is True for result in results)
 
             update_token_table_rows()
-            tab.toast("Success", f"Disconnected {count} token accounts", "SUCCESS")
+            if count == len(connected_clients):
+                tab.toast("Accounts disconnected", f"Disconnected {count} managed account{'s' if count != 1 else ''}.", "SUCCESS")
+            else:
+                tab.toast("Some accounts stayed connected", f"Disconnected {count} of {len(connected_clients)} accounts. Check Managed Accounts for errors.", "ERROR")
         except Exception as e:
-            tab.toast("Error", f"Leave all failed: {e}", "ERROR")
+            print(f"[VC Manager] Leave All stopped: {e}", type_="ERROR")
+            tab.toast("Leave All stopped", "Nighty hit an internal error. Open the Nighty console for the technical details.", "ERROR")
         finally:
             disc_all_btn.loading = False
 
     def handle_token_leave(row_id):
         row_id_str = str(row_id)
-        if row_id_str in token_clients:
-            async def leave_token():
-                if await token_clients[row_id_str].leave_vc():
-                    tab.toast("Success", "Account disconnected", "SUCCESS")
+        async def manage_token():
+            client = token_clients.get(row_id_str)
+            if client and client.is_in_vc:
+                if await client.leave_vc():
+                    tab.toast("Account disconnected", "The account remains saved in Managed Accounts.", "SUCCESS")
                 else:
-                    tab.toast("Error", "Account is not connected", "ERROR")
+                    tab.toast("Disconnect failed", client.last_error or "Discord did not accept the leave request.", "ERROR")
                 update_token_table_rows()
-            safe_create_task(leave_token())
+                return
+
+            data = load_tokens()
+            if data.get("_load_error"):
+                tab.toast("Token file is broken", data["_load_error"], "ERROR")
+                return
+            original_count = len(data.get("tokens", []))
+            data["tokens"] = [
+                item for item in data.get("tokens", [])
+                if not isinstance(item, dict) or str(item.get("id") or "") != row_id_str
+            ]
+            if len(data["tokens"]) == original_count:
+                tab.toast("Account not found", "Refresh Managed Accounts and try again.", "ERROR")
+                return
+            if not save_tokens(data):
+                tab.toast("Could not remove account", "Nighty could not update the token file.", "ERROR")
+                return
+            client = token_clients.pop(row_id_str, None)
+            if client:
+                await client.close()
+            update_token_table_rows()
+            tab.toast("Account removed", "The saved token was removed from VC Manager.", "SUCCESS")
+
+        safe_create_task(manage_token())
 
     # Wire all callbacks
     server_select.onChange = handle_server_select
@@ -3807,14 +4557,16 @@ def vc_manager_farm_script():
     data = load_data()
     settings = data.get("settings", {})
 
-    is_muted = bool(settings.get("muted", False))
-    is_deafened = bool(settings.get("deafened", False))
-    is_streaming = bool(settings.get("streaming", False))
-    is_camera_on = bool(settings.get("camera_on", False))
-    is_auto_reconnect = bool(settings.get("auto_reconnect", False))
-    is_leave_when_alone = bool(settings.get("leave_when_alone", False))
-    is_auto_follow = bool(settings.get("auto_follow", False))
+    is_muted = as_bool(settings.get("muted", False))
+    is_deafened = as_bool(settings.get("deafened", False))
+    is_streaming = as_bool(settings.get("streaming", False))
+    is_camera_on = as_bool(settings.get("camera_on", False))
+    is_auto_reconnect = as_bool(settings.get("auto_reconnect", False))
+    is_leave_when_alone = as_bool(settings.get("leave_when_alone", False))
+    is_auto_follow = as_bool(settings.get("auto_follow", False))
     follow_target_id = str(settings.get("follow_target_id", ""))
+    if is_auto_follow and not follow_target_id.isdigit():
+        is_auto_follow = False
 
     mute_toggle.checked = is_muted
     deafen_toggle.checked = is_deafened
@@ -3825,7 +4577,7 @@ def vc_manager_farm_script():
     follow_toggle.checked = is_auto_follow
     follow_target_input.value = follow_target_id
 
-    saved_timer = settings.get("auto_disconnect_minutes")
+    saved_timer = timer_minutes(settings.get("auto_disconnect_minutes"))
     if saved_timer and is_actually_connected():
         safe_create_task(schedule_disconnect(saved_timer))
 
@@ -3836,12 +4588,17 @@ def vc_manager_farm_script():
     # 3. Fast server & channel pre-population
     async def startup_sync():
         await asyncio.sleep(0.1)
+        if token_clients:
+            clients = list(token_clients.values())
+            results = await asyncio.gather(
+                *(client.start_gateway() for client in clients),
+                return_exceptions=True
+            )
+            for client, result in zip(clients, results):
+                if isinstance(result, Exception):
+                    print(f"[VC Manager] Could not start {client.name}: {result}", type_="ERROR")
         await refresh_server_list(preserve_selection=True)
         await sync_voice_state(update_ui=True)
-    @bot.listen("on_ready")
-    async def handle_bot_ready():
-        await startup_sync()
-
     async def live_timer_ticker():
         tick_count = 0
         while True:
@@ -3856,10 +4613,44 @@ def vc_manager_farm_script():
                     ui_refs["total_time_text"].content = f"Total Time: {format_duration(total_seconds)}"
                 if tick_count % 5 == 0:
                     await sync_voice_state(update_ui=True)
+                if tick_count % 10 == 0:
+                    # Some Nighty web builds redraw the tab after Socket.IO's
+                    # connect event. Reinstall CUI periodically so a browser
+                    # refresh cannot leave serialized __CUI__ text on screen.
+                    reeval()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"[VC Manager] Timer update failed: {e}", type_="ERROR")
+
+    def ensure_live_timer():
+        existing = runtime_state.get("ticker_task")
+        if existing and not existing.done():
+            return existing
+        runtime_state["ticker_task"] = safe_create_task(live_timer_ticker())
+        return runtime_state["ticker_task"]
+
+    @bot.listen("on_ready")
+    async def handle_bot_ready():
+        await startup_sync()
+        ensure_live_timer()
+
+    runtime_state["listeners"].append(("on_ready", handle_bot_ready))
+
+    def schedule_browser_ui_restore():
+        previous_restore = runtime_state.get("ui_restore_task")
+        if previous_restore and not previous_restore.done():
+            previous_restore.cancel()
+
+        async def restore_after_render():
+            # The private tab is painted asynchronously. These passes cover the
+            # initial DOM, Nighty's follow-up React render, and slower browsers.
+            for delay in (0.10, 0.35, 0.75, 1.50, 3.00):
+                await asyncio.sleep(delay)
+                reeval()
+
+        runtime_state["ui_restore_task"] = safe_create_task(restore_after_render())
+        return runtime_state["ui_restore_task"]
 
     initial_connected = is_actually_connected()
     for toggle in (mute_toggle, deafen_toggle, stream_toggle, camera_toggle):
@@ -3869,10 +4660,7 @@ def vc_manager_farm_script():
     def vc_manager_ui_connect():
         """Re-publish the current UI tree whenever the private web tab reconnects."""
         tab.render()
-        evaluate_js(CardPager.pg_js(None))
-        evaluate_js(VC_UI_JS)
-        automation_pager.build()
-        update_token_table_rows()
+        schedule_browser_ui_restore()
 
     vc_manager_ui_connect._vc_manager_socket_handler = True
 
@@ -3881,10 +4669,11 @@ def vc_manager_farm_script():
     evaluate_js(VC_UI_JS)
     automation_pager.build()
     update_token_table_rows()
+    schedule_browser_ui_restore()
 
     bot_is_ready = getattr(bot, "is_ready", None)
     if not callable(bot_is_ready) or bot_is_ready():
         safe_create_task(startup_sync())
-    safe_create_task(live_timer_ticker())
+    ensure_live_timer()
 
 vc_manager_farm_script()
