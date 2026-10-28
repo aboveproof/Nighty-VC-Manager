@@ -238,7 +238,7 @@ def vc_manager_farm_script():
         const PREFIX = '__CUI__';
         const cui = window.cUIData = window.cUIData || {};
         cui.templates = cui.templates || {};
-        cui.version = 'vc-manager-reload-safe-v2';
+        cui.version = 'vc-manager-mobile-recovery-v3';
 
         const removeElement = function(element) {
             if (!element) return;
@@ -354,43 +354,76 @@ def vc_manager_farm_script():
         };
 
         cui.findPlaceholders = function(root) {
-            const searchRoot = root && root.nodeType ? root : document;
+            const firstRoot = root && root.nodeType ? root : document;
+            const searchRoots = [];
+            const rootSeen = typeof Set === 'function' ? new Set() : null;
             const found = [];
             const seen = typeof Set === 'function' ? new Set() : null;
-            if (!document.createTreeWalker || typeof NodeFilter === 'undefined') {
-                const candidates = searchRoot.querySelectorAll ? searchRoot.querySelectorAll('p, span, div') : [];
-                Array.prototype.forEach.call(candidates, function(element) {
-                    if ((element.textContent || '').trim().indexOf(PREFIX) === 0) found.push(element);
+
+            const addRoot = function(candidate) {
+                if (!candidate || !candidate.nodeType) return;
+                if (rootSeen && rootSeen.has(candidate)) return;
+                if (rootSeen) rootSeen.add(candidate);
+                searchRoots.push(candidate);
+            };
+
+            addRoot(firstRoot);
+            for (let rootIndex = 0; rootIndex < searchRoots.length; rootIndex += 1) {
+                const searchRoot = searchRoots[rootIndex];
+                const descendants = searchRoot.querySelectorAll ? searchRoot.querySelectorAll('*') : [];
+                Array.prototype.forEach.call(descendants, function(element) {
+                    if (element.shadowRoot) addRoot(element.shadowRoot);
+                    if (String(element.tagName || '').toLowerCase() === 'iframe') {
+                        try {
+                            addRoot(element.contentDocument);
+                        } catch (error) {
+                            // Cross-origin frames cannot contain Nighty's tab UI.
+                        }
+                    }
                 });
-                return found;
             }
 
-            const walker = document.createTreeWalker(
-                searchRoot,
-                NodeFilter.SHOW_TEXT,
-                {
-                    acceptNode: function(node) {
-                        return (node.nodeValue || '').trim().indexOf(PREFIX) === 0
-                            ? NodeFilter.FILTER_ACCEPT
-                            : NodeFilter.FILTER_REJECT;
+            searchRoots.forEach(function(searchRoot) {
+                const ownerDocument = searchRoot.ownerDocument || searchRoot;
+                if (!ownerDocument.createTreeWalker || typeof NodeFilter === 'undefined') {
+                    const candidates = searchRoot.querySelectorAll ? searchRoot.querySelectorAll('p, span, div') : [];
+                    Array.prototype.forEach.call(candidates, function(element) {
+                        if ((element.textContent || '').trim().indexOf(PREFIX) !== 0) return;
+                        if (!seen || !seen.has(element)) {
+                            if (seen) seen.add(element);
+                            found.push(element);
+                        }
+                    });
+                    return;
+                }
+
+                const walker = ownerDocument.createTreeWalker(
+                    searchRoot,
+                    NodeFilter.SHOW_TEXT,
+                    {
+                        acceptNode: function(node) {
+                            return (node.nodeValue || '').trim().indexOf(PREFIX) === 0
+                                ? NodeFilter.FILTER_ACCEPT
+                                : NodeFilter.FILTER_REJECT;
+                        }
                     }
+                );
+                let textNode = walker.nextNode();
+                while (textNode) {
+                    let element = textNode.parentElement;
+                    while (element && element.parentElement) {
+                        const elementText = (element.textContent || '').trim();
+                        const parentText = (element.parentElement.textContent || '').trim();
+                        if (parentText !== elementText || parentText.indexOf(PREFIX) !== 0 || element.parentElement.children.length > 1) break;
+                        element = element.parentElement;
+                    }
+                    if (element && (!seen || !seen.has(element))) {
+                        if (seen) seen.add(element);
+                        found.push(element);
+                    }
+                    textNode = walker.nextNode();
                 }
-            );
-            let textNode = walker.nextNode();
-            while (textNode) {
-                let element = textNode.parentElement;
-                while (element && element.parentElement) {
-                    const elementText = (element.textContent || '').trim();
-                    const parentText = (element.parentElement.textContent || '').trim();
-                    if (parentText !== elementText || parentText.indexOf(PREFIX) !== 0 || element.parentElement.children.length > 1) break;
-                    element = element.parentElement;
-                }
-                if (element && (!seen || !seen.has(element))) {
-                    if (seen) seen.add(element);
-                    found.push(element);
-                }
-                textNode = walker.nextNode();
-            }
+            });
             return found;
         };
 
@@ -496,6 +529,63 @@ def vc_manager_farm_script():
     })();
     """
 
+    def get_cui_templates():
+        templates = {}
+        for name, definition in CUI.registry.items():
+            if definition["type"] != "element":
+                continue
+            valid_params = definition["init_params"]
+            empty_kwargs = {param: None for param in valid_params if param != "self"}
+            templates[name] = definition["class"](**empty_kwargs).html
+        return templates
+
+    def build_cui_bootstrap_js(include_helpers=False):
+        """Build one ordered payload so slower browsers cannot miss CUI templates."""
+        scripts = [JS_CUI]
+        templates = get_cui_templates()
+        if templates:
+            scripts.append(
+                "window.cUIData.updateTemplates(" + json.dumps(templates) + ");"
+            )
+
+        if include_helpers:
+            try:
+                scripts.append(CardPager.pg_js())
+            except (NameError, AttributeError):
+                pass
+            try:
+                scripts.append(VC_UI_JS)
+            except NameError:
+                pass
+
+        scripts.append("""
+            (function() {
+                function restoreCUI() {
+                    if (!window.cUIData) return;
+                    try {
+                        window.cUIData.installRecovery();
+                        window.cUIData.scanAndInject(document);
+                    } catch (error) {
+                        console.error('VC Manager CUI recovery failed:', error);
+                    }
+                }
+
+                restoreCUI();
+                [50, 150, 400, 1000, 2500, 5000].forEach(function(delay) {
+                    setTimeout(restoreCUI, delay);
+                });
+
+                if (!window.__vcManagerCUIRecoveryEvents) {
+                    window.__vcManagerCUIRecoveryEvents = true;
+                    window.addEventListener('load', restoreCUI);
+                    window.addEventListener('pageshow', restoreCUI);
+                    window.addEventListener('online', restoreCUI);
+                    document.addEventListener('visibilitychange', restoreCUI);
+                }
+            })();
+        """)
+        return "\n".join(scripts)
+
     def _cui_cb(hook_id, func_name, value):
         ins_data = CUI.instances.get(hook_id)
         if ins_data:
@@ -555,45 +645,17 @@ def vc_manager_farm_script():
     def p_render(self):
         self._o_render()
         callback_store.register(_cui_cb)
-
-        e_tmps = {}
-        for name, definition in CUI.registry.items():
-            if definition["type"] == "element":
-                valid_params = definition["init_params"]
-                filtered_kwargs = {p: None for p in valid_params if p != 'self'}
-                e_tmps[name] = definition["class"](**filtered_kwargs).html
-
-        evaluate_js(JS_CUI)
-        if e_tmps:
-            evaluate_js(f"window.cUIData.updateTemplates({json.dumps(e_tmps)})")
+        evaluate_js(build_cui_bootstrap_js(include_helpers=True))
     Tab.render = p_render
 
     def reeval():
         try:
-            evaluate_js(JS_CUI)
+            # Keep the bootstrap and templates in one browser evaluation. Mobile
+            # tabs can process separate Socket.IO messages out of order while a
+            # page is still mounting.
+            evaluate_js(build_cui_bootstrap_js(include_helpers=True))
 
-            e_tmps = {}
-            for name, definition in CUI.registry.items():
-                if definition["type"] == "element":
-                    valid_params = definition["init_params"]
-                    filtered_kwargs = {p: None for p in valid_params if p != 'self'}
-                    e_tmps[name] = definition["class"](**filtered_kwargs).html
-
-            if e_tmps:
-                evaluate_js(f"window.cUIData.updateTemplates({json.dumps(e_tmps)})")
-
-    # A browser reload creates a new JavaScript window. Restore CUI and the
-    # helpers that store pager state and layout behavior.
-            try:
-                evaluate_js(CardPager.pg_js())
-            except (NameError, AttributeError):
-                pass
-            try:
-                evaluate_js(VC_UI_JS)
-            except NameError:
-                pass
-
-    # Send current rows and connection state to the new page.
+            # Send current rows and connection state to the new page.
             try:
                 update_all_ui()
                 update_token_table_rows()
