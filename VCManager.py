@@ -682,19 +682,75 @@ def vc_manager_farm_script():
         def __init__(self, label="Default", min_val=0, max_val=100, value=50, on_change=None):
             self.funcs = [on_change]
             self.html = """
-                <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 1px; width: 100%; padding: 0 8px 0 0; align-items: stretch;">
-                    <label style="font-size: 0.875rem;">
-                        ${data.label}
-                    </label>
-                    <div style="display: flex; align-items: center; gap: 6px;">
-                        <input type="range"
-                               min="${data.min_val}" max="${data.max_val}" value="${data.value}"
-                               style="flex-grow: 1; accent-color: #4a6d88; cursor: pointer;"
-                               oninput="this.nextElementSibling.innerText = this.value;"
-                               onchange="${on_change}">
-                        <span style="min-width: 30px; text-align: right; font-family: monospace;">
-                            ${data.value}
+                <style>
+                    .vc-timer-slider {
+                        width: 100%;
+                        height: 4px;
+                        margin: 0;
+                        appearance: none;
+                        -webkit-appearance: none;
+                        border-radius: 999px;
+                        background: rgba(148, 163, 184, 0.28);
+                        cursor: pointer;
+                        outline: none;
+                    }
+                    .vc-timer-slider::-webkit-slider-thumb {
+                        width: 16px;
+                        height: 16px;
+                        appearance: none;
+                        -webkit-appearance: none;
+                        border: 3px solid #4a6d88;
+                        border-radius: 50%;
+                        background: #f8fafc;
+                        box-shadow: 0 1px 4px rgba(8, 15, 28, 0.45);
+                        transition: border-color 160ms ease, transform 160ms ease;
+                    }
+                    .vc-timer-slider::-moz-range-thumb {
+                        width: 10px;
+                        height: 10px;
+                        border: 3px solid #4a6d88;
+                        border-radius: 50%;
+                        background: #f8fafc;
+                        box-shadow: 0 1px 4px rgba(8, 15, 28, 0.45);
+                        transition: border-color 160ms ease, transform 160ms ease;
+                    }
+                    .vc-timer-slider::-moz-range-progress {
+                        height: 4px;
+                        border-radius: 999px;
+                        background: #4a6d88;
+                    }
+                    .vc-timer-slider:hover::-webkit-slider-thumb,
+                    .vc-timer-slider:focus-visible::-webkit-slider-thumb {
+                        border-color: #6f91ab;
+                        transform: scale(1.08);
+                    }
+                    .vc-timer-slider:hover::-moz-range-thumb,
+                    .vc-timer-slider:focus-visible::-moz-range-thumb {
+                        border-color: #6f91ab;
+                        transform: scale(1.08);
+                    }
+                    .vc-timer-slider:focus-visible {
+                        box-shadow: 0 0 0 3px rgba(74, 109, 136, 0.24);
+                    }
+                </style>
+                <div style="flex: 1 1 auto; display: flex; flex-direction: column; gap: 9px; width: 100%; min-width: 180px; padding-right: 8px;">
+                    <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px;">
+                        <label style="font-size: 0.8125rem; font-weight: 600;">
+                            ${data.label}
+                        </label>
+                        <span data-slider-value style="min-width: 58px; padding: 3px 7px; border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 6px; background: rgba(15, 23, 42, 0.32); font-family: monospace; font-size: 0.75rem; font-variant-numeric: tabular-nums; text-align: center;">
+                            ${data.value} min
                         </span>
+                    </div>
+                    <input class="vc-timer-slider"
+                           type="range"
+                           min="${data.min_val}" max="${data.max_val}" value="${data.value}"
+                           aria-label="${data.label}"
+                           oninput="this.parentElement.querySelector('[data-slider-value]').textContent = this.value === '0' ? 'Off' : this.value + ' min';"
+                           onchange="${on_change}">
+                    <div style="display: flex; justify-content: space-between; font-family: monospace; font-size: 0.6875rem; font-variant-numeric: tabular-nums; opacity: 0.62;">
+                        <span>Off</span>
+                        <span>2 hr</span>
                     </div>
                 </div>
             """
@@ -788,7 +844,7 @@ def vc_manager_farm_script():
                     const style = document.createElement('style');
                     style.id = 'vc-manager-pager-style';
                     style.textContent = `
-                        .cui-pager-wrapper { position: relative; overflow: hidden; width: 100%; transition: height 0.3s ease-in-out; }
+                        .cui-pager-wrapper { position: relative; overflow: hidden; width: 100%; }
                         .cui-page {
                             width: 100%;
                             height: auto;
@@ -899,6 +955,12 @@ def vc_manager_farm_script():
                             }
 
                             const firstPage = pages[0];
+                            const setStableHeight = () => {
+                                const stableHeight = pages.reduce((height, page) => {
+                                    return Math.max(height, page.scrollHeight);
+                                }, 0);
+                                wrapper.style.height = `${stableHeight}px`;
+                            };
                             if (firstPage) {
                                 firstPage.style.transition = 'none';
                                 firstPage.style.transform = 'translateX(0%)';
@@ -906,7 +968,7 @@ def vc_manager_farm_script():
                                 firstPage.style.pointerEvents = 'auto';
                                 void firstPage.offsetHeight;
                                 firstPage.style.transition = '';
-                                wrapper.style.height = `${firstPage.scrollHeight}px`;
+                                setStableHeight();
                             }
 
                             const btnStyle = "background: none; border: none; cursor: pointer; font-size: 24px; padding: 0 5px; line-height: 1; opacity: 0.75; transition: opacity 0.2s ease;";
@@ -925,8 +987,7 @@ def vc_manager_farm_script():
 
                             if (typeof ResizeObserver === 'function') {
                                 const resizeObserver = new ResizeObserver(() => {
-                                    const activePage = wrapper.querySelectorAll('.cui-page')[parseInt(wrapper.dataset.currentPage)];
-                                    if (activePage) wrapper.style.height = `${activePage.scrollHeight}px`;
+                                    setStableHeight();
                                 });
                                 pages.forEach(p => resizeObserver.observe(p));
                             }
@@ -962,7 +1023,6 @@ def vc_manager_farm_script():
                                    targetPageEl.style.opacity = '1';
                                    targetPageEl.style.pointerEvents = 'auto';
                                 });
-                                wrapper.style.height = `${targetPageEl.scrollHeight}px`;
                             }
 
                             wrapper.dataset.currentPage = targetIndex;
@@ -4073,13 +4133,13 @@ def vc_manager_farm_script():
     timer_group = automation_page.create_group(type="columns", gap=2)
     timer_slider = timer_group.create_ui_element(
         UI.Slider,
-        label="Disconnect Timer (minutes; 0 = off)",
+        label="Disconnect timer",
         min_val=0,
         max_val=120,
         value=pending_timer_minutes,
         on_change=handle_timer_slider
     )
-    apply_timer_btn = timer_group.create_ui_element(UI.Button, label="Set Timer", variant="solid", color="primary")
+    apply_timer_btn = timer_group.create_ui_element(UI.Button, label="Save timer", variant="solid", color="primary")
     automation_pager.build()
 
     ui_refs["reconnect_toggle"] = reconnect_toggle
