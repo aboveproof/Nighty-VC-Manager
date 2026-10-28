@@ -23,6 +23,8 @@ The dashboard handles the primary Nighty account and optional secondary accounts
 | ![Demo of VcManager](assets/dashboard2.png)                                                          |
 | :--------------------------------------------------------------------------------------------------: |
 
+---
+
 > [!WARNING]
 > Nighty is a Discord selfbot. Selfbots and user-account automation can violate Discord's Terms of Service and may put accounts at risk. This project is not affiliated with Discord or Nighty. You are responsible for how you use it.
 
