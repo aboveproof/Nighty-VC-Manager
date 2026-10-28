@@ -4,7 +4,7 @@
 
 Voice controls, session tracking, automation, slash commands, and multi-account connections for Nighty.
 
-[![Version](https://img.shields.io/badge/version-4.0-5865F2?style=flat-square)](./VCManager.py)
+[![Version](https://img.shields.io/badge/version-4.1.0-5865F2?style=flat-square)](./VCManager.py)
 [![NightyScript](https://img.shields.io/badge/NightyScript-4.9-111827?style=flat-square)](https://nighty.one/)
 [![Python](https://img.shields.io/badge/Python-3.x-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE)
@@ -79,6 +79,7 @@ Secondary accounts use direct Discord Gateway connections. Tokens stay in a loca
 - Discord Components V2 responses
 - Active Nighty V2 theme support
 - Ephemeral responses enabled by default
+- Dashboard toggles for ephemeral responses, theme use, and detailed status
 - Automatic command fingerprinting and synchronization
 
 ## Requirements

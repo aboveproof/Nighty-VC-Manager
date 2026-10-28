@@ -1,6 +1,6 @@
 # VC Manager for Nighty
 # Authors: @rico, @snowy, @factz
-# High-speed Voice Channel Controller, Telemetry & Multi-Token Manager with CUI Integration
+# Voice controls, session data, and multi-token account management for Nighty
 
 @nightyScript(
     name="VC Manager v4.1.0",
@@ -44,14 +44,13 @@ def vc_manager_farm_script():
     - One Discord account can have only one voice state per server. Use a
       secondary managed account when two simultaneous calls are in one server.
     - Secondary Discord user tokens are stored locally in the Nighty scripts
-      JSON directory. Protect that directory and never share its contents.
+      JSON directory. Keep that directory private.
     - The CUI compatibility layer is initialized inside this function as
       required by the upstream CUI project.
     """
 
-    # Imports deliberately live inside the Nighty entry point. Nighty executes
-    # scripts with separate global/local namespaces, so module-level imports can
-    # otherwise be missing later inside callbacks (for example, aiohttp).
+    # Keep imports inside the Nighty entry point. Nighty gives scripts separate
+    # global and local namespaces, which can hide module imports from callbacks.
     import asyncio
     import functools
     import hashlib
@@ -71,9 +70,8 @@ def vc_manager_farm_script():
 
     import aiohttp
 
-    # Nighty replaces script code without restarting its Python process. Cancel
-    # work owned by the previous VC Manager generation so stale tickers and
-    # gateway loops cannot keep updating an older UI after a hot reload.
+    # Nighty replaces scripts in the same Python process. Cancel tasks from the
+    # previous VC Manager load so old timers and gateway loops stop updating it.
     runtime_key = "_vc_manager_runtime"
     previous_runtime = getattr(bot, runtime_key, None)
     previous_token_clients = []
@@ -103,7 +101,7 @@ def vc_manager_farm_script():
             except Exception as e:
                 print(f"[VC Manager] Could not stop a stale task: {e}", type_="ERROR")
 
-    # Clean listeners left by builds that predate runtime listener tracking.
+    # Remove listeners left by builds that predate runtime listener tracking.
     # discord.py stores @bot.listen handlers in extra_events.
     legacy_listener_names = {
         "on_voice_state_update": "handle_voice_state_update",
@@ -134,9 +132,8 @@ def vc_manager_farm_script():
     }
     setattr(bot, runtime_key, runtime_state)
 
-    # One-time compatibility cleanup for versions released before runtime task
-    # tracking was added. Snapshot first so tasks created by this load are never
-    # included, even when cancellation must be queued onto the bot loop.
+    # Older releases did not track runtime tasks. Capture their tasks before
+    # this load creates new work, then queue cancellation on the bot loop.
     legacy_task_names = {
         "live_timer_ticker", "startup_sync", "timer", "reconnect_later",
         "_gateway_loop", "_heartbeat"
@@ -585,8 +582,8 @@ def vc_manager_farm_script():
             if e_tmps:
                 evaluate_js(f"window.cUIData.updateTemplates({json.dumps(e_tmps)})")
 
-            # A browser reload creates a new JavaScript window. Restore the
-            # helpers that hold pager state and layout behavior as well as CUI.
+    # A browser reload creates a new JavaScript window. Restore CUI and the
+    # helpers that store pager state and layout behavior.
             try:
                 evaluate_js(CardPager.pg_js())
             except (NameError, AttributeError):
@@ -596,7 +593,7 @@ def vc_manager_farm_script():
             except NameError:
                 pass
 
-            # Push dynamic rows and connection state back into the new page.
+    # Send current rows and connection state to the new page.
             try:
                 update_all_ui()
                 update_token_table_rows()
@@ -658,9 +655,8 @@ def vc_manager_farm_script():
 
     @socketio.on("connect")
     def vc_manager_cui_connect():
-        # Some embedded browsers reuse a Socket.IO session during a page
-        # refresh. Reinstalling is idempotent and avoids leaving raw __CUI__
-        # placeholders visible when that happens.
+    # Some embedded browsers reuse a Socket.IO session after a refresh.
+    # Reinstall CUI so the page does not show raw __CUI__ placeholders.
         reeval()
 
     vc_manager_cui_connect._vc_manager_socket_handler = True
@@ -1646,7 +1642,7 @@ def vc_manager_farm_script():
                 if (list) {
                     list.innerHTML = '';
                     if (!sessions || sessions.length === 0) {
-                        list.innerHTML = '<div style="text-align: center; padding: 24px; font-size: 13px;">No recorded voice sessions yet</div>';
+                        list.innerHTML = '<div style="text-align: center; padding: 24px; font-size: 13px;">No voice sessions</div>';
                     } else {
                         sessions.slice().reverse().slice(0, 30).forEach(s => {
                             const row = document.createElement('div');
@@ -1778,9 +1774,8 @@ def vc_manager_farm_script():
                                 pass
                         time.sleep(0.08 * (attempt + 1))
 
-                # Antivirus, sync tools, and some Nighty builds can hold a
-                # replace-incompatible handle while still allowing an ordinary
-                # overwrite. Keep this fallback under the same process lock.
+            # Antivirus software or sync tools may block file replacement while
+            # allowing writes. Keep the fallback under the process lock.
                 try:
                     with open(path, "w", encoding="utf-8", newline="\n") as file:
                         json.dump(data, file, indent=4, ensure_ascii=False)
@@ -1852,8 +1847,8 @@ def vc_manager_farm_script():
     _updating_dropdowns = False
     ui_refs = {}
     status_editor_channel_id = None
-    # Only a connection explicitly opened by this script belongs to VC Manager.
-    # A normal Nighty/Discord voice session must never be adopted by the panel.
+    # VC Manager owns connections opened through this script. Ignore Nighty's
+    # separate voice session.
     managed_target = previous_managed_target
 
     # Multi-token state
@@ -1926,9 +1921,8 @@ def vc_manager_farm_script():
                 if running_loop is bot_loop:
                     task = bot_loop.create_task(coro)
                 else:
-                    # Nighty invokes CUI callbacks and script setup from worker
-                    # threads. Queue work onto the bot loop instead of creating
-                    # an asyncio Task from a thread that has no current loop.
+    # Nighty may invoke CUI callbacks from worker threads. Queue their work on
+    # the bot loop because worker threads may not have an event loop.
                     task = asyncio.run_coroutine_threadsafe(coro, bot_loop)
             elif running_loop and running_loop.is_running():
                 task = running_loop.create_task(coro)
@@ -1949,8 +1943,7 @@ def vc_manager_farm_script():
             task.add_done_callback(lambda completed: runtime_state["tasks"].discard(completed))
         return task
 
-    # Older versions did not track their gateway clients in runtime_state.
-    # Close any clients that were tracked by the immediately previous load.
+    # Close gateway clients stored by the previous script load.
     for previous_client in previous_token_clients:
         try:
             close_result = previous_client.close()
@@ -2093,7 +2086,7 @@ def vc_manager_farm_script():
                         if response.status == 403:
                             return "This account cannot open the selected voice channel. Check View Channel and Connect permissions for its roles."
                         if response.status == 404:
-                            return "This account cannot find the selected channel. Make sure it is still in the server and can see the channel."
+                            return "This account cannot access the selected channel. Check its server membership and channel permissions."
                         if response.status == 429:
                             retry_after = 1.0
                             try:
@@ -2135,12 +2128,10 @@ def vc_manager_farm_script():
                 self.user_id = None
                 self.sequence = None
                 start_lock = await wait_for_gateway_start_slot()
-                # Discord supplies its own opcode heartbeat after HELLO. Keep
-                # aiohttp's separate WebSocket ping timer disabled with None;
-                # zero can schedule an immediate ping and immediate timeout.
-                # Also avoid a numeric ws_connect timeout because supported
-                # aiohttp builds treat it as a receive timeout. Limit only the
-                # opening handshake with asyncio.wait_for instead.
+            # Discord starts an opcode heartbeat after HELLO. Disable aiohttp's
+            # WebSocket ping timer because zero can trigger a timeout at once.
+            # Limit the opening handshake with asyncio.wait_for; some aiohttp
+            # builds treat ws_connect's numeric timeout as a receive timeout.
                 self.ws = await asyncio.wait_for(
                     self.http_session.ws_connect(
                         "wss://gateway.discord.gg/?v=10&encoding=json",
@@ -2350,8 +2341,7 @@ def vc_manager_farm_script():
                 self._set_status("Join failed", "Could not send the voice join request. Reconnect the account and try again.")
                 return False
 
-            # Discord can take several seconds to dispatch the account's own
-            # VOICE_STATE_UPDATE when several tokens connect at once.
+            # Discord may delay VOICE_STATE_UPDATE when several tokens connect.
             for _ in range(60):
                 if self.is_in_vc and self.current_channel_id == str(channel_id):
                     if self.is_streaming:
@@ -2650,8 +2640,7 @@ def vc_manager_farm_script():
             if bool(getattr(permissions, "set_voice_channel_status", False)):
                 return True
 
-            # Compatibility with Nighty builds whose permission wrapper predates
-            # the named property. Discord assigns this permission to bit 48.
+    # Nighty builds without the named permission property can read bit 48.
             permission_value = int(getattr(permissions, "value", 0) or 0)
             return bool(permission_value & (1 << 48))
         except Exception:
@@ -2895,9 +2884,8 @@ def vc_manager_farm_script():
             update_all_ui()
             return False
 
-        # A normal VOICE_STATE_UPDATE can arrive between the gateway writes and
-        # briefly report the previous stream value. Keep the user's requested
-        # value until Discord emits the stream-specific state update.
+        # VOICE_STATE_UPDATE may report the old stream value between gateway
+        # writes. Keep the requested value until Discord sends the stream event.
         if requested_stream_state is not None:
             is_streaming = requested_stream_state
 
@@ -2918,7 +2906,7 @@ def vc_manager_farm_script():
         return True
 
     async def sync_managed_voice_controls(mute=None, deaf=None, stream=None, video=None):
-        """Mirror requested primary controls to every connected managed account."""
+        """Apply the primary controls to connected managed accounts."""
         clients = [client for client in token_clients.values() if client.is_in_vc]
         if not clients:
             return 0, 0
@@ -2975,8 +2963,7 @@ def vc_manager_farm_script():
             target_guild_id = str((managed_target or {}).get("guild_id") or "")
             if not target_guild_id:
                 return False
-            # Clear the clock before yielding so the voice-state event cannot
-            # record the same session while this coroutine also finalizes it.
+        # Clear the clock before yielding to prevent duplicate session records.
             set_connection_start(None)
             sent = await send_voice_state(target_guild_id, None)
             if sent:
@@ -3056,13 +3043,11 @@ def vc_manager_farm_script():
             target_guild_id = str((managed_target or {}).get("guild_id") or "")
             target_channel_id = str((managed_target or {}).get("channel_id") or "")
 
-            # Ignore voice activity started outside VC Manager. This prevents a
-            # normal Discord/Nighty call from appearing as the managed session.
+        # Ignore voice activity started outside VC Manager.
             if not target_guild_id or not event_guild or str(event_guild.id) != target_guild_id:
                 return
 
-            # Moving the account elsewhere in the same server ends the managed
-            # session; the unrelated destination must not be adopted.
+            # A move to another channel ends the managed session.
             if new_channel and str(new_channel.id) != target_channel_id:
                 if old_channel and str(old_channel.id) == target_channel_id:
                     record_session(old_channel, connection_start_time)
@@ -3142,7 +3127,7 @@ def vc_manager_farm_script():
         # 2. OTHER MEMBER UPDATES
         cur = get_current_voice_channel()
 
-        # Auto-follow also works when the primary account is currently disconnected.
+    # Auto-follow can connect a disconnected primary account.
         if is_auto_follow and follow_target_id and str(member.id) == str(follow_target_id):
             target_channel = getattr(after, "channel", None) if after else None
             if target_channel and (not cur or target_channel.id != cur.id):
@@ -3173,8 +3158,7 @@ def vc_manager_farm_script():
     # ==================== NIGHTY SLASH API + COMPONENTS V2 ====================
 
     # Adapted from lord-m1nx/nighty-slash-api. Nighty injects `discord`,
-    # `app_commands`, and `bot_app`; importing discord directly is unsupported
-    # in ordinary Nighty scripts, so the injected objects are used here.
+    # `app_commands`, and `bot_app`, so this script uses those objects.
     try:
         discord_api = discord
     except NameError:
@@ -3191,9 +3175,7 @@ def vc_manager_farm_script():
     COMPONENTS_V2_FLAG = 1 << 15
     EPHEMERAL_FLAG = 1 << 6
 
-    # A hot reload can leave the previous generation's text commands in the
-    # running command registry. Remove every legacy VC command during the
-    # migration so only the /vc application-command group remains.
+    # Remove legacy VC text commands left in Nighty's registry after a reload.
     for legacy_command_name in (
         "joinvc", "vcload", "leavevc", "vcmute", "vcunmute",
         "vcdeafen", "vcundeafen", "vcstream", "vccamera",
@@ -3225,6 +3207,18 @@ def vc_manager_farm_script():
             "detailed_status": bool(settings.get("detailed_status", True))
         }
         save_data(data)
+
+    def sync_command_settings_ui(settings=None):
+        settings = settings or get_slash_response_settings()
+        toggle_keys = {
+            "command_ephemeral_toggle": "ephemeral",
+            "command_theme_toggle": "use_theme",
+            "command_detailed_toggle": "detailed_status",
+        }
+        for ref_name, setting_key in toggle_keys.items():
+            toggle = ui_refs.get(ref_name)
+            if toggle:
+                toggle.checked = bool(settings.get(setting_key, True))
 
     def slash_theme_layout(content):
         """Build Discord Components V2 using nes's Nighty V2 theme schema."""
@@ -3429,9 +3423,7 @@ def vc_manager_farm_script():
                 pass
             group_obj = app_commands_api.Group(name=name, description=description[:100])
 
-            # Discord ignores context/install decorators on subcommands. They
-            # must be attached to the top-level group for /vc to appear in
-            # guilds, bot DMs, and user-installed private/group DMs.
+    # Discord reads context and install decorators from the top-level group.
             allowed_contexts = getattr(app_commands_api, "allowed_contexts", None)
             if callable(allowed_contexts):
                 try:
@@ -3750,7 +3742,7 @@ def vc_manager_farm_script():
                 return
             sessions = load_data().get("sessions", [])[-5:]
             if not sessions:
-                return await ctx.send_v2("Session History", "No recorded voice sessions.")
+                return await ctx.send_v2("Session History", "No voice sessions.")
             lines = [
                 f"- **#{session.get('channel_name', '?')}** in **{session.get('guild_name', '?')}**: "
                 f"{format_duration(session.get('duration_seconds', 0))}"
@@ -3870,18 +3862,19 @@ def vc_manager_farm_script():
                 changed.append("Detailed status")
             if changed:
                 save_slash_response_settings(settings)
+            sync_command_settings_ui(settings)
 
             def setting_label(value):
                 return "Enabled" if value else "Disabled"
 
-            heading = "Settings updated.\n\n" if changed else ""
+            heading = "Saved your settings.\n\n" if changed else ""
             await ctx.send_v2(
                 "VC Manager Settings",
                 heading
                 + f"**Ephemeral responses:** {setting_label(settings['ephemeral'])}\n"
                 + f"**Nighty V2 theme:** {setting_label(settings['use_theme'])}\n"
                 + f"**Detailed status:** {setting_label(settings['detailed_status'])}\n\n"
-                + "Run `/vc settings` with any option to change it."
+                + "Use `/vc settings` options to change these values."
             )
 
         @vc_group.command(name="help", description="Show all VC Manager slash commands")
@@ -3982,11 +3975,9 @@ def vc_manager_farm_script():
     # ===== COLUMN 2 (RIGHT) =====
     col2 = main.create_container(type="rows", width="full", height="auto", gap=4)
 
-    # Compact status cards share the top row.
+    # Place connection and channel status on one row.
     status_row = col2.create_container(type="columns", width="full", height="auto", gap=4)
-    # Match the working main-grid pattern: one naturally sized column followed
-    # by one flexible column. Two `full` children make CUI allocate 100% twice
-    # and push the Channel Status card off-screen.
+    # Give Voice Status its content width and Channel Status the remaining space.
     status_card = status_row.create_card(type="rows", width="auto", height="auto", gap=2, disallow_shrink=True)
     status_card.create_ui_element(UI.Text, content="Voice Status", size="base", weight="bold")
 
@@ -4049,8 +4040,15 @@ def vc_manager_farm_script():
     ui_refs["stream_toggle"] = stream_toggle
     ui_refs["camera_toggle"] = camera_toggle
 
+    # Place automation and command settings on one row.
+    automation_settings_row = col2.create_container(type="columns", width="full", height="auto", gap=4)
+
     # Automation & Timers Card
-    automation_card = col2.create_card(type="rows", width="full", height="auto", gap=3)
+    # Full width gives both cards the same flex basis. CUI can measure a hidden
+    # auto-width pager as a few pixels after a browser refresh.
+    automation_card = automation_settings_row.create_card(
+        type="rows", width="full", height="auto", vertical_align="start", gap=3
+    )
     automation_pager = CardPager(automation_card, max_height=300)
     automation_page = automation_pager.create_page()
     automation_page.create_ui_element(UI.Text, content="Automation & Timers", size="lg", weight="bold")
@@ -4090,8 +4088,41 @@ def vc_manager_farm_script():
     ui_refs["follow_target_input"] = follow_target_input
     ui_refs["timer_slider"] = timer_slider
 
+    # Command Settings Card
+    command_settings = get_slash_response_settings()
+    command_settings_card = automation_settings_row.create_card(
+        type="rows", width="full", height="auto", vertical_align="start", gap=3
+    )
+    command_settings_card.create_ui_element(
+        UI.Text, content="Command Settings", size="lg", weight="bold"
+    )
+    command_ephemeral_toggle = command_settings_card.create_ui_element(
+        UI.Toggle,
+        label="Ephemeral Responses",
+        checked=command_settings["ephemeral"],
+    )
+    command_theme_toggle = command_settings_card.create_ui_element(
+        UI.Toggle,
+        label="Nighty V2 Theme",
+        checked=command_settings["use_theme"],
+    )
+    command_detailed_toggle = command_settings_card.create_ui_element(
+        UI.Toggle,
+        label="Detailed Status",
+        checked=command_settings["detailed_status"],
+    )
+    command_settings_card.create_ui_element(
+        UI.Text,
+        content="Use these toggles for /vc settings.",
+        size="sm",
+    )
+
+    ui_refs["command_ephemeral_toggle"] = command_ephemeral_toggle
+    ui_refs["command_theme_toggle"] = command_theme_toggle
+    ui_refs["command_detailed_toggle"] = command_detailed_toggle
+
     # 2. MULTI-TOKEN CONTAINER
-    # Stack these cards so the table always receives the full viewport width on web.
+    # Stack these cards so the account table can use the viewport width.
     multi_token_container = tab.create_container(type="rows", width="full", height="auto", gap=4)
 
     token_card = multi_token_container.create_card(type="rows", width="full", height="auto", gap=3)
@@ -4132,7 +4163,28 @@ def vc_manager_farm_script():
             )
             return
 
-        members = getattr(cur, "members", [])
+        members = list(getattr(cur, "members", []) or [])
+        if not members:
+        # Nighty may populate channel.members after rendering the tab. Read the
+        # guild voice-state cache so the first paint includes channel members.
+            guild = getattr(cur, "guild", None)
+            voice_states = getattr(guild, "_voice_states", {}) if guild else {}
+            cached_members = []
+            for user_id, voice_state in voice_states.items():
+                state_channel = getattr(voice_state, "channel", None)
+                state_channel_id = getattr(state_channel, "id", None)
+                if state_channel_id is None:
+                    state_channel_id = getattr(voice_state, "channel_id", None)
+                if str(state_channel_id or "") != str(cur.id):
+                    continue
+                try:
+                    member = guild.get_member(int(user_id))
+                except (TypeError, ValueError):
+                    member = None
+                if member:
+                    cached_members.append(member)
+            if cached_members:
+                members = cached_members
         ui_refs["participants_title"].content = f"Channel Participants ({len(members)})"
 
         rows = []
@@ -4421,7 +4473,7 @@ def vc_manager_farm_script():
             ch_id = direct_id or selected_item_id(ui_refs["channel_select"].selected_items)
 
             if not ch_id or ch_id in ("none", "loading", "error") or not str(ch_id).strip().isdigit():
-                tab.toast("Error", "Please select or enter a valid Voice Channel ID", "ERROR")
+                tab.toast("Invalid channel", "Select a voice channel or enter its numeric ID.", "ERROR")
                 return
 
             ch_int = int(str(ch_id).strip())
@@ -4434,7 +4486,7 @@ def vc_manager_farm_script():
                 guild_id = str(channel.guild.id)
                 ch_name = channel.name
 
-            # 2. Check every cached guild before trusting the selected server.
+        # Search cached guilds before using the selected server.
             if not guild_id:
                 for g in getattr(bot, "guilds", []):
                     c = g.get_channel(ch_int)
@@ -4443,7 +4495,7 @@ def vc_manager_farm_script():
                         ch_name = c.name
                         break
 
-            # 3. Fetch a direct ID when it is not present in cache.
+        # Fetch a direct ID when the cache misses it.
             if not guild_id:
                 try:
                     c = await bot.fetch_channel(ch_int)
@@ -4453,19 +4505,19 @@ def vc_manager_farm_script():
                 except Exception:
                     pass
 
-            # 4. A selected guild is the final fallback for uncached channels.
+        # Use the selected guild for uncached channels.
             if not guild_id and not direct_id:
                 selected_guild = selected_item_id(ui_refs["server_select"].selected_items)
                 if selected_guild not in ("", "none", "loading", "error"):
                     guild_id = selected_guild
 
             if not guild_id:
-                tab.toast("Error", "Could not find Server ID. Please select a server from the dropdown.", "ERROR")
+                tab.toast("Server required", "Select the server that contains this voice channel.", "ERROR")
                 return
 
             ok = await connect(guild_id, ch_id)
             if not ok:
-                tab.toast("Error", "Could not send voice join packet to gateway", "ERROR")
+                tab.toast("Join failed", "Nighty could not send the voice join request.", "ERROR")
                 return
 
             tab.toast("Connecting", f"Joining #{ch_name}...", "INFO")
@@ -4479,7 +4531,7 @@ def vc_manager_farm_script():
                 update_all_ui()
                 tab.toast("Not connected", f"Discord did not confirm the connection to #{ch_name}", "ERROR")
         except Exception as e:
-            tab.toast("Error", f"Failed to join: {e}", "ERROR")
+            tab.toast("Join error", str(e), "ERROR")
         finally:
             join_button.loading = False
 
@@ -4489,9 +4541,9 @@ def vc_manager_farm_script():
             if await disconnect_from_voice(intentional=True):
                 tab.toast("Disconnected", "Left voice channel", "SUCCESS")
             else:
-                tab.toast("Error", "No active voice connection could be disconnected", "ERROR")
+                tab.toast("Not connected", "VC Manager has no active voice connection.", "ERROR")
         except Exception as e:
-            tab.toast("Error", f"Failed to leave: {e}", "ERROR")
+            tab.toast("Disconnect error", str(e), "ERROR")
         finally:
             leave_button.loading = False
 
@@ -4499,33 +4551,33 @@ def vc_manager_farm_script():
         refresh_list_button.loading = True
         try:
             await refresh_server_list(preserve_selection=True)
-            tab.toast("Success", "Channel list refreshed", "SUCCESS")
+            tab.toast("Channels refreshed", "VC Manager loaded the current channel list.", "SUCCESS")
         except Exception as e:
-            tab.toast("Error", f"Refresh failed: {e}", "ERROR")
+            tab.toast("Refresh error", str(e), "ERROR")
         finally:
             refresh_list_button.loading = False
 
     async def handle_mute_toggle(checked):
         if await update_voice_state(mute=checked):
-            tab.toast("Success", f"Microphone {'muted' if is_muted else 'unmuted'}", "SUCCESS")
+            tab.toast("Microphone", "Muted" if is_muted else "Unmuted", "SUCCESS")
         else:
             tab.toast("Error", "Connect to a voice channel first", "ERROR")
 
     async def handle_deafen_toggle(checked):
         if await update_voice_state(deaf=checked):
-            tab.toast("Success", f"Audio {'deafened' if is_deafened else 'undeafened'}", "SUCCESS")
+            tab.toast("Audio", "Deafened" if is_deafened else "Undeafened", "SUCCESS")
         else:
             tab.toast("Error", "Connect to a voice channel first", "ERROR")
 
     async def handle_stream_toggle(checked):
         if await update_voice_state(stream=checked):
-            tab.toast("Success", f"Screen share {'enabled' if is_streaming else 'disabled'}", "SUCCESS")
+            tab.toast("Screen share", "Enabled" if is_streaming else "Disabled", "SUCCESS")
         else:
             tab.toast("Error", "Connect to a voice channel first", "ERROR")
 
     async def handle_camera_toggle(checked):
         if await update_voice_state(video=checked):
-            tab.toast("Success", f"Camera {'enabled' if is_camera_on else 'disabled'}", "SUCCESS")
+            tab.toast("Camera", "Enabled" if is_camera_on else "Disabled", "SUCCESS")
         else:
             tab.toast("Error", "Connect to a voice channel first", "ERROR")
 
@@ -4535,7 +4587,7 @@ def vc_manager_farm_script():
         data = load_data()
         data["settings"]["auto_reconnect"] = is_auto_reconnect
         save_data(data)
-        tab.toast("Success", f"Auto-reconnect {'enabled' if is_auto_reconnect else 'disabled'}", "SUCCESS")
+        tab.toast("Auto-reconnect", "Enabled" if is_auto_reconnect else "Disabled", "SUCCESS")
 
     async def handle_leave_alone_toggle(checked):
         nonlocal is_leave_when_alone
@@ -4543,7 +4595,7 @@ def vc_manager_farm_script():
         data = load_data()
         data["settings"]["leave_when_alone"] = is_leave_when_alone
         save_data(data)
-        tab.toast("Success", f"Leave when alone {'enabled' if is_leave_when_alone else 'disabled'}", "SUCCESS")
+        tab.toast("Leave when alone", "Enabled" if is_leave_when_alone else "Disabled", "SUCCESS")
 
     async def handle_follow_toggle(checked):
         nonlocal is_auto_follow, follow_target_id
@@ -4560,7 +4612,7 @@ def vc_manager_farm_script():
         data["settings"]["auto_follow"] = is_auto_follow
         data["settings"]["follow_target_id"] = follow_target_id
         save_data(data)
-        tab.toast("Success", f"Auto-follow {'enabled' if is_auto_follow else 'disabled'}", "SUCCESS")
+        tab.toast("Auto-follow", "Enabled" if is_auto_follow else "Disabled", "SUCCESS")
 
     async def handle_follow_target_input(value):
         nonlocal follow_target_id, is_auto_follow
@@ -4570,7 +4622,7 @@ def vc_manager_farm_script():
             is_auto_follow = False
             ui_refs["follow_toggle"].checked = False
             data["settings"]["auto_follow"] = False
-            tab.toast("Auto-Follow", "Disabled because the target ID is invalid", "INFO")
+            tab.toast("Auto-follow disabled", "Enter a numeric Discord user ID.", "INFO")
         if data["settings"].get("follow_target_id") != follow_target_id:
             data["settings"]["follow_target_id"] = follow_target_id
         save_data(data)
@@ -4583,16 +4635,33 @@ def vc_manager_farm_script():
             data["settings"]["auto_disconnect_minutes"] = val if val > 0 else None
             save_data(data)
             await schedule_disconnect(val)
-            tab.toast("Success", f"Disconnect timer set to {val} min" if val > 0 else "Timer disabled", "SUCCESS")
+            tab.toast("Disconnect timer", f"Set to {val} min" if val > 0 else "Disabled", "SUCCESS")
         except Exception as e:
-            tab.toast("Error", f"Failed to set timer: {e}", "ERROR")
+            tab.toast("Timer error", str(e), "ERROR")
         finally:
             apply_timer_btn.loading = False
+
+    async def update_command_setting(setting_key, checked, label):
+        command_settings = get_slash_response_settings()
+        command_settings[setting_key] = as_bool(checked)
+        save_slash_response_settings(command_settings)
+        sync_command_settings_ui(command_settings)
+        state = "enabled" if command_settings[setting_key] else "disabled"
+        tab.toast("Command Settings", f"{label} {state}", "SUCCESS")
+
+    async def handle_command_ephemeral_toggle(checked):
+        await update_command_setting("ephemeral", checked, "Ephemeral responses")
+
+    async def handle_command_theme_toggle(checked):
+        await update_command_setting("use_theme", checked, "Nighty V2 theme")
+
+    async def handle_command_detailed_toggle(checked):
+        await update_command_setting("detailed_status", checked, "Detailed status")
 
     def handle_open_channel_info():
         cur = get_current_voice_channel()
         if not cur:
-            tab.toast("Info", "Connect to a voice channel first to view telemetry", "INFO")
+            tab.toast("Not connected", "Connect through VC Manager to view channel details.", "INFO")
             return
 
         tab.channelinfomodal(
@@ -4619,7 +4688,7 @@ def vc_manager_farm_script():
             current_data = load_data()
             current_data["sessions"] = []
             save_data(current_data)
-            tab.toast("Success", "Session history cleared", "SUCCESS")
+            tab.toast("History cleared", "VC Manager removed the saved sessions.", "SUCCESS")
 
         tab.sessionhistorymodal(
             sessions_json=json.dumps(json.dumps(sessions, ensure_ascii=False)),
@@ -4645,20 +4714,20 @@ def vc_manager_farm_script():
             if success:
                 ui_refs["voice_status_input"].value = result
                 ui_refs["voice_status_hint"].content = (
-                    "Channel status cleared."
+                    "VC Manager cleared the channel status."
                     if not result
-                    else "Channel status updated."
+                    else "VC Manager updated the channel status."
                 )
                 tab.toast(
                     "Channel Status",
-                    "Status cleared" if not result else "Status updated",
+                    "Cleared" if not result else "Updated",
                     "SUCCESS"
                 )
             else:
                 tab.toast("Channel Status", result, "ERROR")
         except Exception as e:
             print(f"[VC Manager] Could not apply voice channel status: {e}", type_="ERROR")
-            tab.toast("Channel Status", "Could not update the status", "ERROR")
+            tab.toast("Channel Status", "Nighty could not update the channel status.", "ERROR")
         finally:
             button.loading = False
 
@@ -4686,7 +4755,7 @@ def vc_manager_farm_script():
                 tab.toast("Token file is broken", data["_load_error"], "ERROR")
                 return
             if any(isinstance(item, dict) and str(item.get("token", "")).strip() == tok for item in data.get("tokens", [])):
-                tab.toast("Account already added", "This exact token already exists in Managed Accounts.", "ERROR")
+                tab.toast("Account already added", "Managed Accounts already contains this token.", "ERROR")
                 return
             new_id = str(uuid.uuid4())
             data["tokens"].append({"id": new_id, "token": tok, "name": name})
@@ -4714,7 +4783,7 @@ def vc_manager_farm_script():
             ui_refs["token_name_input"].value = ""
             update_token_table_rows()
             if client.user_id:
-                tab.toast("Account added", f"{name} signed in and is ready to join.", "SUCCESS")
+                tab.toast("Account added", f"{name} signed in and can join voice channels.", "SUCCESS")
             else:
                 tab.toast(
                     "Account saved, login failed",
@@ -4723,7 +4792,7 @@ def vc_manager_farm_script():
                 )
         except Exception as e:
             print(f"[VC Manager] Could not add managed account: {e}", type_="ERROR")
-            tab.toast("Could not add account", "Nighty hit an internal error. Open the Nighty console for the technical details.", "ERROR")
+            tab.toast("Account error", "Nighty hit an internal error. Open the console for details.", "ERROR")
         finally:
             add_token_btn.loading = False
 
@@ -4762,7 +4831,7 @@ def vc_manager_farm_script():
                     continue
                 if isinstance(result, Exception):
                     print(f"[VC Manager] Join All failed for {client.name}: {result}", type_="ERROR")
-                    client._set_status("Join failed", "Nighty hit an internal error for this account. Open the Nighty console for details.")
+                    client._set_status("Join failed", "Nighty hit an internal error for this account. Open the console for details.")
                 failures.append((client.name, client.last_error or "Discord did not confirm the voice join."))
 
             update_token_table_rows()
@@ -4786,7 +4855,7 @@ def vc_manager_farm_script():
                     )
         except Exception as e:
             print(f"[VC Manager] Join All stopped: {e}", type_="ERROR")
-            tab.toast("Join All stopped", "Nighty hit an internal error. Open the Nighty console for the technical details.", "ERROR")
+            tab.toast("Join All error", "Nighty hit an internal error. Open the console for details.", "ERROR")
         finally:
             conn_all_btn.loading = False
 
@@ -4810,7 +4879,7 @@ def vc_manager_farm_script():
                 tab.toast("Some accounts stayed connected", f"Disconnected {count} of {len(connected_clients)} accounts. Check Managed Accounts for errors.", "ERROR")
         except Exception as e:
             print(f"[VC Manager] Leave All stopped: {e}", type_="ERROR")
-            tab.toast("Leave All stopped", "Nighty hit an internal error. Open the Nighty console for the technical details.", "ERROR")
+            tab.toast("Leave All error", "Nighty hit an internal error. Open the console for details.", "ERROR")
         finally:
             disc_all_btn.loading = False
 
@@ -4864,7 +4933,7 @@ def vc_manager_farm_script():
                 state_text = "enabled" if enabled else "disabled"
                 tab.toast(
                     f"{label} {state_text}",
-                    f"Updated {client.name} without changing the other managed accounts.",
+                    f"{client.name} now uses this setting.",
                     "SUCCESS",
                 )
             else:
@@ -4974,7 +5043,7 @@ def vc_manager_farm_script():
             if client:
                 await client.close()
             update_token_table_rows()
-            tab.toast("Account removed", "The saved token was removed from VC Manager.", "SUCCESS")
+            tab.toast("Account removed", "VC Manager removed the saved token.", "SUCCESS")
 
         safe_create_task(remove_token())
 
@@ -4984,7 +5053,7 @@ def vc_manager_farm_script():
             client = token_clients.get(row_id_str)
             if client and client.is_in_vc:
                 if await client.leave_vc():
-                    tab.toast("Account disconnected", "The account remains saved in Managed Accounts.", "SUCCESS")
+                    tab.toast("Account disconnected", "Managed Accounts still contains this account.", "SUCCESS")
                 else:
                     tab.toast("Disconnect failed", client.last_error or "Discord did not accept the leave request.", "ERROR")
                 update_token_table_rows()
@@ -5009,7 +5078,7 @@ def vc_manager_farm_script():
             if client:
                 await client.close()
             update_token_table_rows()
-            tab.toast("Account removed", "The saved token was removed from VC Manager.", "SUCCESS")
+            tab.toast("Account removed", "VC Manager removed the saved token.", "SUCCESS")
 
         safe_create_task(manage_token())
 
@@ -5028,6 +5097,9 @@ def vc_manager_farm_script():
     follow_toggle.onChange = handle_follow_toggle
     follow_target_input.onInput = handle_follow_target_input
     apply_timer_btn.onClick = handle_apply_timer
+    command_ephemeral_toggle.onChange = handle_command_ephemeral_toggle
+    command_theme_toggle.onChange = handle_command_theme_toggle
+    command_detailed_toggle.onChange = handle_command_detailed_toggle
     details_btn.onClick = handle_open_channel_info
     logs_btn.onClick = handle_open_history
     set_channel_status_btn.onClick = handle_set_channel_status
@@ -5061,6 +5133,7 @@ def vc_manager_farm_script():
     leave_alone_toggle.checked = is_leave_when_alone
     follow_toggle.checked = is_auto_follow
     follow_target_input.value = follow_target_id
+    sync_command_settings_ui()
 
     saved_timer = timer_minutes(settings.get("auto_disconnect_minutes"))
     if saved_timer and is_actually_connected():
@@ -5072,7 +5145,11 @@ def vc_manager_farm_script():
 
     # 3. Fast server & channel pre-population
     async def startup_sync():
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.02)
+    # Paint the primary connection and participants before secondary gateways
+    # finish logging in.
+        await sync_voice_state(update_ui=True)
+        await refresh_server_list(preserve_selection=True)
         if token_clients:
             clients = list(token_clients.values())
             results = await asyncio.gather(
@@ -5082,8 +5159,7 @@ def vc_manager_farm_script():
             for client, result in zip(clients, results):
                 if isinstance(result, Exception):
                     print(f"[VC Manager] Could not start {client.name}: {result}", type_="ERROR")
-        await refresh_server_list(preserve_selection=True)
-        await sync_voice_state(update_ui=True)
+            update_token_table_rows()
     async def live_timer_ticker():
         tick_count = 0
         while True:
@@ -5099,9 +5175,8 @@ def vc_manager_farm_script():
                 if tick_count % 5 == 0:
                     await sync_voice_state(update_ui=True)
                 if tick_count % 10 == 0:
-                    # Some Nighty web builds redraw the tab after Socket.IO's
-                    # connect event. Reinstall CUI periodically so a browser
-                    # refresh cannot leave serialized __CUI__ text on screen.
+    # Some Nighty web builds redraw the tab after Socket.IO connects. Reinstall
+    # CUI on each pass so a refresh does not show serialized __CUI__ text.
                     reeval()
             except asyncio.CancelledError:
                 break
@@ -5128,8 +5203,7 @@ def vc_manager_farm_script():
             previous_restore.cancel()
 
         async def restore_after_render():
-            # The private tab is painted asynchronously. These passes cover the
-            # initial DOM, Nighty's follow-up React render, and slower browsers.
+    # Nighty paints the private tab in stages. Run CUI after each paint.
             for delay in (0.10, 0.35, 0.75, 1.50, 3.00):
                 await asyncio.sleep(delay)
                 reeval()
@@ -5143,8 +5217,9 @@ def vc_manager_farm_script():
 
     @socketio.on("connect")
     def vc_manager_ui_connect():
-        """Re-publish the current UI tree whenever the private web tab reconnects."""
+        """Publish the current UI tree after the private tab reconnects."""
         tab.render()
+        update_all_ui()
         schedule_browser_ui_restore()
 
     vc_manager_ui_connect._vc_manager_socket_handler = True
@@ -5152,6 +5227,7 @@ def vc_manager_farm_script():
     # 4. Render Nighty tab, then install script-specific DOM helpers.
     tab.render()
     evaluate_js(VC_UI_JS)
+    update_all_ui()
     automation_pager.build()
     update_token_table_rows()
     schedule_browser_ui_restore()
