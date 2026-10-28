@@ -1,0 +1,2152 @@
+FOLLOW NIGHTY SCRIPTING DOCUMENTATION AND NIGHTY UI SCRIPTING DOCUMENTATION
+
+
+# NightyScript Documentation v4.9 (Public)
+
+**Maintained by:** __rico__ | 1361736124858630274
+
+**Made with:** [manus.im](https://manus.im) and [claude.ai](https://claude.ai)
+
+---
+
+## Table of Contents
+
+- [1. Overview](#1-overview)
+- [2. Script Structure](#2-script-structure)
+- [3. Command Prefix](#3-command-prefix)
+- [4. Core Functions](#4-core-functions)
+- [5. Asynchronous Operations](#5-asynchronous-operations)
+- [6. Common Script Patterns](#6-common-script-patterns)
+
+## 1. Overview
+
+NightyScript extends Nighty (a Discord selfbot) with custom Python scripts. Scripts define commands and event handlers. Nighty manages the Discord connection; scripts focus purely on functionality. It is built on a modified version of the discord.py-self library.
+
+**Do not** use standard `discord.py` libraries directly, except as documented.
+
+### 1.1 Prohibited Imports
+
+The following imports will cause script failure:
+
+```python
+import discord
+import nighty
+from discord import *
+from nighty import *
+from nighty import bot, nightyScript, getScriptsPath, Tab, UI
+import matplotlib  # or any matplotlib-related imports
+```
+
+* Any other imports from `discord.py` or `nighty` packages.
+
+You may use objects like `discord.File` without importing them — NightyScript makes them available via its built-in API.
+
+### 1.2 Guidelines
+
+* Only use standard Python imports and NightyScript-provided functions.
+* External Python packages (e.g. `pydub`, `numpy`, `matplotlib`) are not allowed, unless they are non-Python tools like Docker.
+* All dependencies must be documented inside the script's docstring.
+
+#### 1.2.1 External Dependencies for Custom Scripts
+
+Custom scripts in this repository may use external dependencies including:
+- Python packages: `selenium`, `beautifulsoup4`, `requests`, `pandas`, etc.
+- Node.js tools: `puppeteer`, `playwright`, etc.
+- System tools: Docker, browser drivers, etc.
+
+Requirements:
+- All dependencies must be documented in the script's docstring
+- Include installation instructions (e.g., `pip install package-name`)
+- For Node.js dependencies, include npm/yarn install commands
+
+### 1.3 Embed Limitation
+
+`discord.Embed` is not supported. Use `forwardEmbedMethod` to send embed-style messages in NightyScript.
+
+### 1.4 Discord API Limitations
+
+NightyScript cannot:
+
+* Cache users globally.
+* Access complete server member lists.
+* Scan all servers to build a user map.
+
+These limitations are enforced by Discord's API. Scripts should operate only within the context of users interacting in channels the selfbot can access.
+
+---
+
+## 2. Script Structure
+
+Create scripts using the `@nightyScript` decorator:
+
+```python
+@nightyScript(
+    name="Script Name",
+    author="Your Name",
+    description="Description",
+    usage="<p>command <args>"
+)
+def script_function():
+    # Script logic
+    pass
+
+script_function()  # IMPORTANT: Call to initialize
+```
+
+**name**: Script's display name (string).
+
+**author**: Script creator (string). Use your name or alias.
+
+**description**: Brief explanation (string).
+
+**usage**: Command syntax. `<p>` is the user's configured prefix. `[]` denotes optional arguments, `-` indicates flags (string).
+
+The decorated function (`script_function`) is the script's entry point. It's called on script load.
+
+`script_function()` (Call): Must be called at the end of the script to register commands and listeners with Nighty.
+
+### 2.1 Documentation Standards
+
+Scripts should include comprehensive documentation following these standards:
+
+#### 2.1.1 Script-Level Documentation
+Add a docstring at the start of your main script function:
+
+```python
+def script_function():
+    """
+    SCRIPT NAME
+    ----------
+
+    Brief description of what the script does and its main purpose.
+
+    COMMANDS:
+    <p>command1 <args> - Description of command1
+    <p>command2 [args] - Description of command2
+
+    EXAMPLES:
+    <p>command1 arg1 arg2 - Example usage of command1
+    <p>command2 -flag     - Example usage of command2 with flags
+
+    NOTES:
+    - Important note about functionality
+    - Any setup requirements (like external tools, API keys)
+    - Special considerations or limitations
+    """
+    # ... script logic ...
+```
+
+#### 2.1.2 Command Documentation
+Each command should have a clear description in its decorator:
+
+```python
+@bot.command(
+    name="command",
+    description="Clear, concise description of what the command does"
+)
+```
+
+#### 2.1.3 Code Comments
+- Use comments to explain complex logic or non-obvious code
+- Keep comments concise but informative
+- Use inline comments sparingly and only when necessary
+- Document any important assumptions or edge cases
+
+#### 2.1.4 Best Practices
+1.  **Consistency**: Follow the same documentation format across all scripts
+2.  **Clarity**: Use clear, simple language
+3.  **Completeness**: Document all commands, arguments, and flags
+4.  **Examples**: Include practical examples for each command
+5.  **Notes**: Highlight any important setup requirements or limitations
+6.  **Updates**: Keep documentation in sync with code changes
+7.  **Self-Contained**: Include all documentation and requirements within the script itself
+
+## 3. Command Prefix
+
+`<p>` in usage strings represents the user's configured command prefix. Scripts do not handle prefix detection directly.
+
+## 4. Core Functions
+
+### 4.1 Configuration (getConfigData, updateConfigData)
+
+NightyScript provides a key-value store for configuration:
+
+Get a configuration value, providing a default if it's not set:
+```python
+value = getConfigData().get("my_key", "default_value")
+```
+
+Set or update a configuration value:
+```python
+updateConfigData("my_key", "new_value")
+```
+
+**`getConfigData()`**: Returns the entire configuration dictionary. For accessing individual values, use the `.get(key, default)` method.
+
+**`updateConfigData(key, value)`**: Sets or updates a configuration value.
+
+**Best Practices**:
+
+-   **Namespacing**: Use unique, descriptive keys (e.g., `scriptname_setting`) to avoid conflicts between scripts.
+-   **Defaults**: Always use `.get(key, default)` to provide a default value if the key is not set.
+-   **Error Handling**: Wrap configuration access in `try...except` blocks, especially during script initialization.
+-   **Initialization**: Within your main script function, set default values for any configuration keys that might not be set by the user.
+
+Note: Use JSON storage (see below) for lists of IDs or more complex data structures. The configuration system is best suited for simple key-value pairs like booleans, strings, or numbers.
+
+### 4.2 JSON Storage
+
+For persistent storage of complex data structures, use JSON files:
+
+```python
+from pathlib import Path
+import json
+
+BASE_DIR = Path(getScriptsPath()) / "json"  # Standard location
+DATA_FILE = BASE_DIR / "my_script_data.json" # Use a script-specific name
+
+BASE_DIR.mkdir(parents=True, exist_ok=True) # Ensure directory exists
+
+# Initialize file if needed
+if not DATA_FILE.exists():
+    with open(DATA_FILE, "w") as f:
+        json.dump({"default_key": []}, f, indent=4)
+
+def load_data():
+    """Loads data from the script's JSON file."""
+    try:
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        print(f"Warning: {DATA_FILE} not found or invalid. Returning default.", type_="ERROR")
+        return {"default_key": []} # Return default structure
+
+def save_data(data):
+    """Saves data to the script's JSON file."""
+    try:
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except IOError as e:
+        print(f"Error saving data to {DATA_FILE}: {e}", type_="ERROR")
+
+```
+
+**Best Practices**:
+
+-   **Directory**: Store JSON files in a `json/` subdirectory within the Nighty scripts directory. Use `getScriptsPath()` to ensure the correct location.
+-   **Filename**: Use a unique, descriptive filename for your script's data (e.g., `my_script_data.json`).
+-   **Initialization**: Check if the file exists, and create it with a default structure if it doesn't.
+-   **Error Handling**: Use `try...except` blocks for all file operations (reading and writing) and log potential errors.
+-   **Data Structure**: Design a clear and efficient JSON structure for your data.
+-   **Helper Functions**: Use separate `load_data()` and `save_data()` functions to encapsulate file I/O.
+
+### 4.3 Bot Commands (@bot.command)
+
+Define commands using the `@bot.command` decorator:
+
+```python
+@bot.command(
+    name="command",
+    aliases=["c", "cmd"], # Optional list of aliases
+    usage="<arg1> [-flag]",
+    description="Desc"
+)
+async def command_handler(ctx, *, args: str):
+    await ctx.message.delete() # Standard first step
+
+    # Argument parsing example:
+    parts = args.split()
+    arg1 = parts[0] if parts else ""
+    flag_present = "-flag" in parts
+
+    if flag_present:
+        # ... process flag ...
+        pass
+
+    # ... process arg1 ...
+
+    msg = await ctx.send("Processing...")  # Optional status message
+    # ... command logic ...
+    await msg.delete()  # Delete the status message (if created)
+```
+
+**`name`**: The command name (string). This is how users will invoke the command.
+
+**`aliases`**: Optional list of alternative command names (string array). Allows users to invoke the command using shorter or alternative names.
+
+**`usage`**: A string describing the command's arguments and flags (for documentation).
+
+**`description`**: A brief description of the command's purpose.
+
+**`ctx`**: The command context (provided by Nighty). It contains information about the message that triggered the command (e.g., `ctx.message`, `ctx.channel`, `ctx.author`, `ctx.guild`).
+
+**`args: str`**: All arguments passed to the command *after* the command name, as a single string. You are responsible for parsing this string.
+
+**Best Practices**:
+
+-   **`await ctx.message.delete()`**: Almost always delete the original command message to keep the chat clean and maintain privacy.
+-   **Argument Parsing**: Use string methods (like `.split()`, `.strip()`, `.startswith()`, `.endswith()`, `.replace()`) or the `re` module (for regular expressions) to process the `args` string effectively. Consider using libraries like `argparse` within your handler if complexity warrants it, but remember no external packages can be *installed*.
+-   **Status Messages**: For commands that take a noticeable amount of time, send a temporary status message (`await ctx.send("Processing...")`) and then delete it (`await msg.delete()`) or edit it (`await msg.edit(content="Done!")`) when the command is finished.
+-   **Error Handling**: Use `try...except` blocks to catch potential errors during command execution (e.g., invalid input, API errors) and send user-friendly error messages to the chat (`await ctx.send("Error: Invalid input provided.")`).
+-   **Aliases**: Use aliases to provide shorter or alternative command names, especially for frequently used commands. Keep aliases short and intuitive.
+
+#### 4.3.1 Command Consolidation with Subcommands
+
+For scripts with multiple related commands, consider consolidating them under a single main command with subcommands. This creates a more organized and intuitive interface.
+
+##### Example Structure:
+
+```python
+@bot.command(
+    name="maincommand",
+    usage="<subcommand> [args] OR <default_action_arg> [-flags]",
+    description="Main command with subcommands for various actions."
+)
+async def main_command(ctx, *, args: str):
+    await ctx.message.delete()
+
+    parts = args.strip().split(maxsplit=1)
+    subcommand = parts[0].lower() if parts else ""
+    subargs = parts[1] if len(parts) > 1 else ""
+
+    if subcommand == "add":
+        await handle_add(ctx, args=subargs)
+    elif subcommand == "remove":
+        await handle_remove(ctx, args=subargs)
+    elif subcommand == "list":
+        await handle_list(ctx, args=subargs)
+    elif subcommand == "config":
+        await handle_config(ctx, args=subargs)
+    elif subcommand in ["help", "?"] or not subcommand: # Handle help or empty input
+        await show_main_help(ctx)
+    else:
+        # Default action if the first arg doesn't match a subcommand
+        # Could treat 'args' as the input for the primary function
+        # Example: Treat 'args' directly as a location for a weather command
+        await handle_default_action(ctx, location=args)
+
+# --- Helper functions for subcommands ---
+async def handle_add(ctx, args):
+    # ... logic to add something ...
+    await ctx.send(f"Added: {args}")
+
+async def handle_remove(ctx, args):
+    # ... logic to remove something ...
+    await ctx.send(f"Removed: {args}")
+
+async def handle_list(ctx, args):
+    # ... logic to list items ...
+    await ctx.send("Listing items...")
+
+async def handle_config(ctx, args):
+    # ... logic to configure settings ...
+    await ctx.send(f"Configuring: {args}")
+
+async def handle_default_action(ctx, location):
+    # ... logic for the main purpose (e.g., get weather for 'location') ...
+    await ctx.send(f"Performing default action for: {location}")
+
+async def show_main_help(ctx):
+    """Shows help information for the main command and its subcommands."""
+    help_text = f"""
+**Command Help: `{getConfigData().get('prefix', '<p>')}maincommand`**
+
+**Usage:**
+`{getConfigData().get('prefix', '<p>')}maincommand <subcommand> [arguments]`
+`{getConfigData().get('prefix', '<p>')}maincommand <default_action_argument>`
+
+**Subcommands:**
+- `add <item>`: Adds an item.
+- `remove <item>`: Removes an item.
+- `list`: Lists all items.
+- `config <setting> <value>`: Configures a setting.
+- `help` or `?`: Shows this help message.
+
+**Default Action:**
+If no subcommand is matched, performs the default action (e.g., fetching data for the provided argument).
+
+**Examples:**
+`{getConfigData().get('prefix', '<p>')}maincommand add MyItem`
+`{getConfigData().get('prefix', '<p>')}maincommand list`
+`{getConfigData().get('prefix', '<p>')}maincommand MyDefaultArg`
+"""
+    await ctx.send(help_text)
+
+```
+
+##### Benefits:
+
+1.  **Organization**: Groups related functionality under one command.
+2.  **Discoverability**: A single `help` subcommand can list all possibilities.
+3.  **Reduced Clutter**: Fewer top-level commands.
+4.  **Namespace**: Avoids potential conflicts with other scripts' command names.
+
+##### Best Practices:
+
+-   **Clear Subcommand Names**: Use intuitive verbs (add, remove, list, set, get, config) or nouns.
+-   **Help Command**: Always include a `help` (or similar) subcommand.
+-   **Default Action**: Decide if the command should have a primary function when no subcommand is given.
+-   **Consistent Parsing**: Handle arguments (`subargs`) consistently across subcommands.
+-   **Error Handling**: Provide clear messages for invalid subcommands or missing arguments.
+-   **Documentation**: Update the main script docstring and the command's `usage`/`description` to reflect the subcommand structure.
+
+
+### 4.4 Event Listeners (@bot.listen)
+
+Handle Discord events using the `@bot.listen` decorator:
+
+```python
+@bot.listen("on_message")
+async def message_handler(message):
+    # Ignore messages sent by the selfbot itself
+    if message.author.id == bot.user.id:
+        return
+
+    # Ignore messages from other bots (optional, but often useful)
+    if message.author.bot:
+        return
+
+    # Example: Auto-respond to a keyword
+    if "hello there" in message.content.lower():
+        try:
+            await message.channel.send("General Kenobi!")
+        except Exception as e:
+            print(f"Error sending auto-response: {e}", type_="ERROR")
+
+    # Example: Log edited messages (requires on_message_edit event)
+@bot.listen("on_message_edit")
+async def edit_logger(before, after):
+     if after.author.id == bot.user.id: # Ignore self-edits
+         return
+     # Check if content actually changed
+     if before.content != after.content:
+         print(f"User {after.author} edited message in {after.channel}: '{before.content}' -> '{after.content}'", type_="INFO")
+
+```
+
+**`message`** (for `on_message`): The message object (provided by Nighty). Contains info like `message.content`, `message.author`, `message.channel`, `message.guild`.
+
+**`before`, `after`** (for `on_message_edit`, `on_message_delete`, `on_voice_state_update`, etc.): Represent the state before and after the event. Consult discord.py documentation for specific event parameters, but remember you *cannot import `discord`*. NightyScript provides the necessary objects directly.
+
+**Common Events**: `on_message`, `on_message_edit`, `on_message_delete`, `on_reaction_add`, `on_voice_state_update`. Check Nighty documentation or experiment to see which are fully supported.
+
+**Best Practices**:
+
+-   **Ignore Self**: *Always* include `if message.author.id == bot.user.id: return` (or similar check using the relevant object like `member.id` or `reaction.user_id`) to prevent loops and unintended actions on the selfbot's own messages/events.
+-   **Ignore Bots**: Consider adding `if message.author.bot: return` if you don't want to react to other bots.
+-   **Efficiency**: Event handlers run on *every* matching event. Keep the logic inside them as efficient as possible. Use filtering (see below) to avoid unnecessary processing.
+-   **Permissions**: Ensure the selfbot has the necessary permissions in the channel/server for any actions the listener takes (e.g., `Send Messages`, `Read Message History`).
+-   **Error Handling**: Wrap event handler logic in `try...except` blocks to prevent one faulty event from crashing the script. Log errors using `print(..., type_="ERROR")`.
+
+### 4.5 Selective Event Handling (Filtering)
+
+Limit event processing based on criteria like server ID, channel ID, or user ID. This is crucial for performance and targeted functionality. Use JSON storage (Section 4.2) for managing lists of IDs.
+
+```python
+# (Continuing the on_message example from 4.4)
+import json
+from pathlib import Path
+
+# --- JSON Setup (similar to Section 4.2) ---
+FILTER_BASE_DIR = Path(getScriptsPath()) / "json"
+ALLOWED_SERVERS_FILE = FILTER_BASE_DIR / "autorespond_servers.json"
+ALLOWED_USERS_FILE = FILTER_BASE_DIR / "autorespond_users.json"
+
+def load_filtered_ids(file_path):
+    # ... (use load_data logic from 4.2, returning empty list on error) ...
+    FILTER_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+            # Ensure it returns a list of strings
+            return [str(item) for item in data] if isinstance(data, list) else []
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+# --- Event Listener with Filtering ---
+@bot.listen("on_message")
+async def filtered_message_handler(message):
+    if message.author.id == bot.user.id or message.author.bot:
+        return
+    if not message.guild: # Ignore DMs for this example
+        return
+
+    # --- Filtering Logic ---
+    allowed_servers = load_filtered_ids(ALLOWED_SERVERS_FILE)
+    allowed_users = load_filtered_ids(ALLOWED_USERS_FILE)
+
+    # If the allowed_servers list exists and is not empty,
+    # check if the current server is in it.
+    if allowed_servers and str(message.guild.id) not in allowed_servers:
+        return # Ignore message if server not allowed
+
+    # If the allowed_users list exists and is not empty,
+    # check if the current author is in it.
+    if allowed_users and str(message.author.id) not in allowed_users:
+        return # Ignore message if user not allowed
+    # --- End Filtering Logic ---
+
+    # Proceed with functionality only if filters passed
+    if "hello there" in message.content.lower():
+        try:
+            await message.channel.send("General Kenobi! (Filtered Response)")
+        except Exception as e:
+            print(f"Error sending filtered auto-response: {e}", type_="ERROR")
+
+# --- Commands to Manage Filters (add these within your script_function) ---
+# Example: Add server command
+@bot.command(name="addrespondserver", description="Allow auto-responses in this server.")
+async def add_respond_server(ctx, *, server_id: str):
+    await ctx.message.delete()
+    try:
+        server_id = str(int(server_id)) # Basic validation
+        servers = load_filtered_ids(ALLOWED_SERVERS_FILE)
+        if server_id not in servers:
+            servers.append(server_id)
+            save_ids(ALLOWED_SERVERS_FILE, servers) # Use your save_data function
+            await ctx.send(f"Server {server_id} added to auto-respond list.")
+        else:
+            await ctx.send("Server already in list.")
+    except ValueError:
+        await ctx.send("Invalid Server ID.")
+    except Exception as e:
+        await ctx.send(f"Error adding server: {e}")
+
+# (Similarly, add commands for remove-server, list-servers, add-user, remove-user, list-users)
+
+```
+
+**Key Filtering Steps:**
+
+1.  **Load Allowed IDs**: Read server/user IDs from your JSON files at the start of the listener.
+2.  **Check Guild/Author**: Get the `message.guild.id` and `message.author.id` (or equivalent for other events). Convert them to strings for reliable comparison with JSON data.
+3.  **Conditional Return**:
+    *   Check if the allowed list exists (`allowed_servers` is not empty).
+    *   If it exists, check if the current ID (`str(message.guild.id)`) is *not* in the list.
+    *   If both conditions are true, `return` early to stop processing the event.
+    *   Repeat for other criteria (users, channels).
+4.  **Empty List Means All**: If an allowed list is empty (or doesn't exist), the filter for that criteria is effectively disabled (meaning all servers/users are allowed by that specific filter).
+
+**Strongly Recommended**: Use JSON files for potentially large lists of IDs. The configuration system (`getConfigData`) is less suitable for this. Provide commands (`<p>addserver`, `<p>removeserver`, etc.) for users to manage these lists easily.
+
+### 4.6 Message Sending
+
+NightyScript provides several ways to send messages:
+
+#### 4.6.1 Basic Text Messages
+
+**`ctx.send(content)`**:
+   - Sends a simple text message to the channel where a command was invoked.
+   - Primarily used within `@bot.command` handlers.
+   - Example: `await ctx.send("Command received!")`
+
+**`message.channel.send(content)`**:
+   - Sends a simple text message to the channel where a message event originated.
+   - Primarily used within `@bot.listen("on_message")` handlers.
+   - Example: `await message.channel.send("Keyword detected!")`
+
+#### 4.6.2 Rich Embed Messages
+
+**`forwardEmbedMethod(...)`**:
+   - **The only way to send rich embed messages.** Do *not* attempt to use `discord.Embed`.
+   - Sends an embed to a *specific* channel ID.
+   - Requires keyword arguments.
+   - **WARNING:** Only supports a limited set of parameters. Using unsupported parameters will raise errors like "unexpected keyword argument".
+
+   ```python
+   # Example within a command context
+   await forwardEmbedMethod(
+       channel_id=ctx.channel.id, # Target the command's channel (REQUIRED)
+       content="# Important Announcement\n\n**Bold text** and *italic text*\n\n> Important note here\n\n- Bullet point 1\n- Bullet point 2\n  - Nested bullet\n\n1. Numbered item\n2. Second item\n\n[Link to documentation](https://example.com)", # Text with markdown formatting
+       title="Message Title", # Optional title for the embed
+       image="https://example.com/image.png" # Optional URL of an image to display
+   )
+
+   # Example within an event listener (sending to a specific log channel)
+   log_channel_id = "123456789012345678" # Get from config or JSON
+   await forwardEmbedMethod(
+       channel_id=log_channel_id,
+       content=f"# Event Detected\n\n**User:** {message.author}\n**Time:** {message.created_at}\n\n> Message content: {message.content}"
+   )
+   ```
+
+   **`forwardEmbedMethod` Supported Parameters:**
+   - `channel_id`: (Required) The ID of the target channel (string or integer).
+   - `content`: (Optional) Text message content with markdown support (see below).
+   - `title`: (Optional) The title of the embed.
+   - `image`: (Optional) URL for a large image within the embed.
+
+   **Supported Markdown in `content`:**
+   - Headings: `# Heading 1`, `## Heading 2`, etc. (only first level renders properly)
+   - Text formatting: `**bold**`, `*italic*`, `__underline__`, `~~strikethrough~~`
+   - Block quotes: `> quoted text`
+   - Lists: Bullet points with `-` and numbered lists with `1.`, `2.`, etc.
+   - Nested lists: Indent with spaces for nested bullets
+   - Links: `[link text](https://example.com)`
+
+   **WARNING:** Parameters like `thumbnail`, `description`, `color`, `footer`, and `fields` are **NOT supported** and will cause errors. To create formatted messages, use markdown within the `content` parameter instead.
+
+#### 4.6.3 Disabling Private Mode for Embeds
+
+Nighty's "private mode" can block outgoing messages like embeds — especially when the script pulls from external sources.
+To ensure your embed sends successfully, **temporarily disable private mode** during the send.
+
+```python
+# Backup current private mode setting (could be True, False, or None)
+current_private = getConfigData().get("private")
+
+# Disable private mode
+updateConfigData("private", False)
+
+try:
+    # Send the embed
+    await forwardEmbedMethod(
+        channel_id=ctx.channel.id,
+        content="Your embed content",
+        title="Your Embed Title"
+    )
+except Exception as e:
+    print(f"Failed to send embed: {e}", type_="ERROR")
+finally:
+    # Always restore the original private setting (even if it was None)
+    updateConfigData("private", current_private)
+```
+
+#### 4.6.4 Sending Stickers
+
+Discord allows bots to send both built-in and custom stickers. Use the `stickers` parameter of `ctx.send` and retrieve the sticker from the cache before falling back to an HTTP fetch. This avoids unnecessary network calls and speeds up repeat usage.
+
+```python
+STICKER_ID = 749054660769218631  # example ID for the "wave" sticker
+sticker = bot.get_sticker(STICKER_ID)
+if not sticker:
+    sticker = await bot.fetch_sticker(STICKER_ID)
+await ctx.send(stickers=[sticker])
+```
+
+`bot.get_sticker` returns `None` if the sticker is not cached. For custom stickers—those uploaded to a guild you have access to—you may need to fetch them the first time with `fetch_sticker`. Once fetched, they remain in the cache for subsequent calls to `get_sticker`.
+
+#### 4.6.5 Sending Emojis
+
+Custom guild emojis work similarly to stickers. Retrieve the emoji from the cache using
+`bot.get_emoji`. If the emoji isn’t cached, send the raw `<:emoji:ID>` string instead.
+
+```python
+EMOJI_ID = 123456789012345678  # example custom emoji
+emoji = bot.get_emoji(EMOJI_ID)
+if emoji:
+    await ctx.send(str(emoji))
+else:
+    await ctx.send(f"<:emoji:{EMOJI_ID}>")
+```
+
+`get_emoji` returns `None` when the emoji isn’t cached or accessible. If the bot lacks access
+to the emoji, the raw string will not render properly.
+
+#### 4.6.6 Silent Messages
+
+Use the `silent=True` parameter with `ctx.send` for quick follow‑up or status
+updates that do not need to ping or notify other users. This is especially
+helpful in direct messages where every notification creates a ping. A "nothing
+burger" confirmation (e.g., "Note added.") can be sent silently so it appears in
+the chat history without generating a new notification.
+
+```python
+msg = await ctx.send("Processing...", silent=True)  # no ping for temporary status
+# ...do work...
+await msg.delete()
+```
+
+
+
+### 4.7 Webhook Integration
+
+Send messages, including complex embeds, to Discord webhooks using the `requests` library. Remember to run synchronous requests in a separate thread.
+
+```python
+import requests
+import json
+import asyncio
+from datetime import datetime
+
+# --- Asynchronous Helper (Required for requests) ---
+async def run_in_thread(func, *args, **kwargs):
+    """Runs a synchronous function in a separate thread."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
+# --- Webhook Sending Function ---
+def send_webhook_message(webhook_url: str, embed_data: dict = None, content: str = None, username: str = None, avatar_url: str = None) -> bool:
+    """
+    Sends a message or embed to a Discord webhook.
+
+    Args:
+        webhook_url: The URL of the Discord webhook.
+        embed_data: A dictionary representing the embed structure.
+        content: Plain text message content.
+        username: Custom username for the webhook message.
+        avatar_url: Custom avatar URL for the webhook message.
+
+    Returns:
+        True if the message was sent successfully (HTTP 204), False otherwise.
+    """
+    if not webhook_url:
+        print("Webhook URL is not configured.", type_="ERROR")
+        return False
+    if not embed_data and not content:
+        print("Webhook requires either content or embed data.", type_="ERROR")
+        return False
+
+    payload = {}
+    if content:
+        payload["content"] = content
+    if embed_data:
+        # Ensure embed_data is properly structured if provided
+        payload["embeds"] = [embed_data]
+    if username:
+        payload["username"] = username
+    if avatar_url:
+        payload["avatar_url"] = avatar_url
+
+    headers = {"Content-Type": "application/json"}
+
+    try:
+        response = requests.post(webhook_url, headers=headers, data=json.dumps(payload), timeout=10)
+        response.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
+
+        # Discord typically returns 204 No Content for successful webhook posts
+        if response.status_code == 204:
+            print("Webhook message sent successfully.", type_="INFO")
+            return True
+        else:
+            # This case might be less common if raise_for_status is used
+            print(f"Webhook returned unexpected status: {response.status_code} {response.text}", type_="ERROR")
+            return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending webhook message: {e}", type_="ERROR")
+        return False
+    except Exception as e:
+        print(f"An unexpected error occurred during webhook sending: {e}", type_="ERROR")
+        return False
+
+
+# --- Example Usage within an async function (e.g., command handler) ---
+async def command_handler(ctx, *, args: str):
+    await ctx.message.delete()
+
+    webhook_url = getConfigData().get("my_script_webhook_url") # Get URL from config
+    if not webhook_url:
+        await ctx.send("Webhook URL not set. Use `<p>setwebhook <url>`.")
+        return
+
+    # Example Embed Data (more complex than forwardEmbedMethod allows)
+    example_embed = {
+        "title": "Webhook Test Embed",
+        "description": f"Triggered by {ctx.author.name}.\nArguments: `{args}`",
+        "color": 0x5865F2, # Discord blurple
+        "fields": [
+            {"name": "Server", "value": ctx.guild.name if ctx.guild else "DM", "inline": True},
+            {"name": "Channel", "value": ctx.channel.name if ctx.guild else "DM", "inline": True}
+        ],
+        "footer": {"text": "Sent via NightyScript Webhook"},
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+    # Send the embed using the helper function wrapped in run_in_thread
+    success = await run_in_thread(
+        send_webhook_message,
+        webhook_url=webhook_url,
+        embed_data=example_embed,
+        username="My Script Logger", # Optional custom username
+        # avatar_url="...", # Optional custom avatar
+        # content="Optional text outside embed" # Optional text
+    )
+
+    if success:
+        await ctx.send("Message sent to webhook successfully.", delete_after=5)
+    else:
+        await ctx.send("Failed to send message to webhook.")
+
+# --- Command to set the webhook URL ---
+@bot.command(name="setwebhook", description="Set the webhook URL for this script.")
+async def set_webhook(ctx, *, url: str):
+    await ctx.message.delete()
+    if url.startswith("https://discord.com/api/webhooks/"):
+        updateConfigData("my_script_webhook_url", url)
+        await ctx.send("Webhook URL updated successfully.")
+    else:
+        await ctx.send("Invalid webhook URL format.")
+
+```
+
+**Best Practices**:
+
+-   **Asynchronous Execution**: **Always** use the `run_in_thread` helper function when calling `requests.post` (or any blocking I/O like file access that isn't inherently async) from within an `async` function (like command handlers or event listeners). This prevents freezing the entire bot.
+-   **Error Handling**: Check the return value of `send_webhook_message` or wrap the `run_in_thread` call in `try...except` to handle potential network errors or invalid webhook URLs gracefully. Log errors using `print`.
+-   **Configuration**: Store webhook URLs in the Nighty configuration (`getConfigData`/`updateConfigData`) or JSON files, not hardcoded in the script. Provide a command for users to set the URL.
+-   **Rate Limits**: Be mindful of Discord's webhook rate limits (generally 30 messages per 60 seconds per channel, but check current Discord developer docs). Avoid spamming webhooks.
+-   **Security**: Treat webhook URLs like passwords. Do not expose them publicly. Inform users about the importance of keeping their configured URLs private.
+
+### 4.8 Logging
+
+NightyScript provides a simple logging mechanism using the built-in `print` function with a `type_` argument.
+
+```python
+# General informational message (Default level if type_ omitted)
+print("Script initialization complete.", type_="INFO")  # Always include type_ parameter
+print("Script initialization complete.", type_="INFO")
+
+print(f"Processing item ID: {item_id}", type_="INFO")
+
+
+# Error message (for critical failures)
+print(f"Failed to connect to database: {error_details}", type_="ERROR")
+
+# Success message (for positive confirmation)
+print("Configuration saved successfully.", type_="SUCCESS")
+```
+
+**Log Levels (`type_` argument):**
+
+-   **`"INFO"`** (Default): General operational information, status updates.
+-   **`"ERROR"`**: Reports critical errors that likely prevent part of the script (or the whole script) from functioning correctly.
+-   **`"SUCCESS"`**: Confirms that an operation completed successfully (e.g., saving data, completing a task).
+
+> **Note**: The `debug_log` function sometimes seen in older scripts is typically a simple wrapper around this `print` function. It often adds formatting like timestamps or script names. Using `print(message, type_="LEVEL")` directly is the standard approach. Example wrapper:
+> ```python
+> from datetime import datetime
+> SCRIPT_NAME = "MyScript" # Define at script start
+> def debug_log(message, type_="INFO"):
+>     # Check if debug logging is enabled via config, if desired
+>     # is_debug = getConfigData().get(f"{SCRIPT_NAME}_debug_enabled", False)
+>     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+>     print(f"[{timestamp}] [{SCRIPT_NAME}] [{type_}] {message}", type_=type_)
+> # Usage: debug_log("User command executed", type_="INFO")
+> ```
+
+#### 4.8.1 Advanced Error Logging
+
+For more structured logging, especially in complex scripts, implement helper functions.
+
+```python
+import traceback
+from datetime import datetime
+
+# Define script name for context
+SCRIPT_NAME = "MyAdvancedScript"
+
+def is_debug_enabled():
+    """Checks if debug logging is enabled in config."""
+    try:
+        # Assumes a config key like "MyAdvancedScript_debug_enabled"
+        return getConfigData().get(f"{SCRIPT_NAME}_debug_enabled", False)
+    except Exception as e:
+        # Fallback print if getConfigData fails during check
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{SCRIPT_NAME}] [ERROR] Error checking debug status: {e}", type_="ERROR")
+        return False
+
+def script_log(message, level="INFO", exc_info=False):
+    """
+    Logs a message with timestamp, script name, and level.
+    Optionally includes exception traceback.
+
+    Args:
+        message (str): The message to log.
+        level (str): Log level ('INFO', 'ERROR', 'SUCCESS').
+        exc_info (bool): If True, appends traceback of current exception.
+    """
+    level = level.upper()
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] [{SCRIPT_NAME}] [{level}] {message}"
+
+    if exc_info:
+        # Append traceback if requested and an exception exists
+        exc_text = traceback.format_exc()
+        if exc_text and exc_text != 'NoneType: None\n': # Only add if there's a traceback
+             log_entry += f"\nTraceback:\n{exc_text}"
+
+    # Use the standard print function with type_ parameter
+    print(log_entry, type_=level)
+
+# --- Example Usage ---
+def some_function():
+    script_log("Starting data processing.", level="INFO")
+    try:
+        user_id = "12345"
+        script_log(f"Fetching data for user: {user_id}", level="INFO")
+        # Simulate an error
+        result = 10 / 0
+    except ZeroDivisionError:
+        script_log("Caught a division by zero error!", level="ERROR", exc_info=True)
+    except Exception as e:
+        # Log other unexpected errors with traceback
+        script_log(f"An unexpected error occurred: {e}", level="ERROR", exc_info=True)
+    finally:
+        script_log("Data processing finished.", level="INFO")
+
+# --- Command to toggle debug mode ---
+@bot.command(name=f"{SCRIPT_NAME.lower()}_debug", description=f"Toggle debug logging for {SCRIPT_NAME}.")
+async def toggle_debug(ctx, *, args: str):
+     await ctx.message.delete()
+     current_state = is_debug_enabled()
+     new_state = not current_state
+     updateConfigData(f"{SCRIPT_NAME}_debug_enabled", new_state)
+     await ctx.send(f"{SCRIPT_NAME} debug logging {'enabled' if new_state else 'disabled'}.")
+
+# --- Inside your main script_function() ---
+# Initialize debug setting if not present
+if getConfigData().get(f"{SCRIPT_NAME}_debug_enabled") is None:
+     updateConfigData(f"{SCRIPT_NAME}_debug_enabled", False)
+
+# Call the example function (or integrate logging into your script)
+# some_function()
+
+```
+
+#### 4.8.2 Best Practices for Logging
+
+1.  **Use Levels Appropriately**: Distinguish between routine info and critical errors.
+2.  **Context is Key**: Log relevant variables or state information, especially with errors. "Error occurred" is less helpful than "Error processing user ID 12345: Connection timeout".
+3.  **Log Exceptions**: When catching errors, log the exception message (`str(e)`) and consider logging the full traceback (`traceback.format_exc()` or use `exc_info=True` in the helper) for `ERROR` level logs.
+4.  **Be Concise but Informative**: Avoid overly verbose logs for `INFO` or `SUCCESS`. Focus on important details.
+5.  **Consistency**: Use a consistent format (like the helper function provides) across your script. Prefixing with the script name is vital when multiple scripts are running.
+6.  **Avoid Sensitive Data**: Be careful not to log passwords, API keys, or private user information.
+
+# 4.9 Executing Slash Commands
+
+NightyScript provides the ability to programmatically execute Discord slash commands from other bots. This is useful for automating interactions with bot commands or creating workflows that chain multiple bot actions together.
+
+## 4.9.1 The exec_slash Function
+
+The `exec_slash` function allows you to execute slash commands by interacting directly with Discord's interaction system.
+
+### Function Signature
+
+```python
+async def exec_slash(ctx, application_id: str, cmdn: str, opt: dict = None):
+    """
+    Executes a Discord slash command programmatically.
+
+    Args:
+        ctx: Command context (required for guild/channel info)
+        application_id: The application ID of the bot whose command you want to execute
+        cmdn: The command name (supports subcommands with space separation)
+        opt: Optional dictionary of command options/parameters
+    """
+```
+
+### Parameters
+
+- **`ctx`**: The command context. Required to determine the guild and channel where the slash command should be executed.
+- **`application_id`**: The Discord application ID (as a string) of the bot that owns the command. You can find this by enabling Developer Mode in Discord, right-clicking the bot's message, and selecting "Copy ID" on the bot's profile.
+- **`cmdn`**: The command name as a string. For subcommands, use space separation (e.g., `"command subcommand"` or `"command subgroup subcommand"`).
+- **`opt`**: Optional dictionary mapping parameter names to their values. The keys must match the exact parameter names defined in the slash command.
+
+### Complete Implementation
+
+Add this helper function to your script:
+
+```python
+import discord
+import traceback
+from datetime import datetime
+
+async def exec_slash(ctx, application_id: str, cmdn: str, opt: dict = None):
+    """
+    Executes a Discord slash command programmatically.
+
+    Args:
+        ctx: Command context (required for guild/channel info)
+        application_id: The application ID of the bot whose command you want to execute
+        cmdn: The command name (supports subcommands with space separation)
+        opt: Optional dictionary of command options/parameters
+    """
+    opt = opt or {}
+    top_command_name = cmdn.split(' ')[0]
+
+    try:
+        # Search for the command in the guild's application command index
+        search_url = f'/users/@me/application-command-index'
+        response_data = await bot.http.request(discord.http.Route('GET', search_url))
+
+        # Find the command by application ID and name
+        full_cmd_data = None
+        for cmd_data in response_data.get('application_commands', []):
+            if str(cmd_data['application_id']) == application_id and cmd_data['name'] == top_command_name:
+                full_cmd_data = cmd_data
+                break
+
+        if not full_cmd_data:
+            print(f"Error: Could not find a command named '{top_command_name}' for application ID {application_id} in this guild.", type_="ERROR")
+            return
+
+    except Exception as e:
+        print(f"Error: Could not search for application commands. {e}", type_="ERROR")
+        traceback.print_exc()
+        return
+
+    # Navigate subcommand structure if needed
+    parts = cmdn.split(' ')
+    target_cmd_data = full_cmd_data
+    if len(parts) > 1:
+        for part_name in parts[1:]:
+            options_map = {o['name']: o for o in target_cmd_data.get('options', [])}
+            target_cmd_data = options_map.get(part_name)
+            if not target_cmd_data:
+                print(f"Error: Could not find subcommand path '{cmdn}'.", type_="ERROR")
+                return
+
+    # Format options with correct types
+    formatted_opts = []
+    if opt and target_cmd_data.get('options'):
+        final_options_map = {o['name']: o for o in target_cmd_data.get('options', [])}
+        for name, value in opt.items():
+            param_info = final_options_map.get(name)
+            if param_info:
+                formatted_opts.append({
+                    "type": param_info['type'],
+                    "name": name,
+                    "value": value
+                })
+
+    # Build payload structure based on command depth
+    payload_options = []
+    if len(parts) > 2:  # Command with subgroup and subcommand
+        payload_options = [{
+            "type": 2,
+            "name": parts[1],
+            "options": [{
+                "type": 1,
+                "name": parts[2],
+                "options": formatted_opts
+            }]
+        }]
+    elif len(parts) > 1:  # Command with subcommand
+        payload_options = [{
+            "type": 1,
+            "name": parts[1],
+            "options": formatted_opts
+        }]
+    else:  # Top-level command
+        payload_options = formatted_opts
+
+    # Construct the interaction payload
+    payload = {
+        "type": 2,
+        "application_id": application_id,
+        "guild_id": str(ctx.guild.id) if ctx.guild else None,
+        "channel_id": str(ctx.channel.id),
+        "session_id": bot.ws.session_id,
+        "nonce": str(int(datetime.now().timestamp() * 1000)),
+        "data": {
+            "version": full_cmd_data['version'],
+            "id": full_cmd_data['id'],
+            "name": full_cmd_data['name'],
+            "type": full_cmd_data['type'],
+            "options": payload_options,
+            "application_command": full_cmd_data,
+            "attachments": []
+        }
+    }
+
+    try:
+        await bot.http.request(
+            discord.http.Route('POST', '/interactions'),
+            json=payload
+        )
+        print(f"Successfully executed '{cmdn}'", type_="SUCCESS")
+
+    except Exception as e:
+        print(f"Error: Failed to execute '{cmdn}': {e}", type_="ERROR")
+        traceback.print_exc()
+```
+
+## 4.9.2 Usage Examples
+
+### Basic Command Execution
+
+```python
+@bot.command(name="ping", description="Execute a bot's ping command")
+async def execute_ping(ctx, *, bot_id: str):
+    await ctx.message.delete()
+
+    # Execute a simple /ping command
+    await exec_slash(ctx, application_id=bot_id, cmdn="ping")
+```
+
+### Command with Parameters
+
+```python
+@bot.command(name="roll", description="Execute a dice roll command")
+async def execute_roll(ctx, *, args: str):
+    await ctx.message.delete()
+
+    parts = args.split()
+    bot_id = parts[0]
+    dice = parts[1] if len(parts) > 1 else "1d6"
+
+    # Execute /roll with a dice parameter
+    await exec_slash(
+        ctx,
+        application_id=bot_id,
+        cmdn="roll",
+        opt={"dice": dice}
+    )
+```
+
+### Subcommand Execution
+
+```python
+@bot.command(name="config", description="Execute a bot's config command")
+async def execute_config(ctx, *, args: str):
+    await ctx.message.delete()
+
+    # Execute /config set with parameters
+    # Command structure: /config set <setting> <value>
+    bot_id = "123456789012345678"
+
+    await exec_slash(
+        ctx,
+        application_id=bot_id,
+        cmdn="config set",
+        opt={
+            "setting": "prefix",
+            "value": "!"
+        }
+    )
+```
+
+### Complex Example with Error Handling
+
+```python
+@bot.command(name="autoplay", description="Execute music bot commands")
+async def autoplay_music(ctx, *, song_name: str):
+    await ctx.message.delete()
+
+    music_bot_id = getConfigData().get("music_bot_id")
+    if not music_bot_id:
+        await ctx.send("Music bot ID not configured. Use `<p>setmusicbot <id>`")
+        return
+
+    try:
+        # First, execute /play command
+        await exec_slash(
+            ctx,
+            application_id=music_bot_id,
+            cmdn="play",
+            opt={"query": song_name}
+        )
+
+        # Wait a moment for the song to start
+        await asyncio.sleep(2)
+
+        # Then execute /loop command
+        await exec_slash(
+            ctx,
+            application_id=music_bot_id,
+            cmdn="loop",
+            opt={"mode": "track"}
+        )
+
+        print(f"Successfully started playing '{song_name}' on loop", type_="SUCCESS")
+
+    except Exception as e:
+        print(f"Error executing music commands: {e}", type_="ERROR")
+        await ctx.send(f"Failed to play song: {e}")
+
+@bot.command(name="setmusicbot", description="Set the music bot application ID")
+async def set_music_bot(ctx, *, bot_id: str):
+    await ctx.message.delete()
+    try:
+        # Validate it's a valid ID (all digits)
+        if bot_id.isdigit():
+            updateConfigData("music_bot_id", bot_id)
+            await ctx.send("Music bot ID updated successfully.")
+        else:
+            await ctx.send("Invalid bot ID format.")
+    except Exception as e:
+        await ctx.send(f"Error setting music bot ID: {e}")
+```
+
+## 4.9.3 Finding Application IDs
+
+To find a bot's application ID:
+
+1. Enable Developer Mode in Discord (User Settings → Advanced → Developer Mode)
+2. Right-click on a message from the bot
+3. Click "Copy Message ID" or right-click the bot's profile and select "Copy ID"
+4. The bot's user ID is typically the same as its application ID
+
+Alternatively, you can:
+- Check the bot's invite link (it contains the application ID)
+- Use Discord's API to fetch application command data
+- Ask the bot owner for the application ID
+
+## 4.9.4 Important Notes and Limitations
+
+### Rate Limiting
+- Discord rate-limits interaction requests
+- Avoid executing many slash commands in rapid succession
+- Add delays between commands using `await asyncio.sleep(seconds)`
+
+### Command Discovery
+- The function automatically discovers command structure
+- It fetches the command schema from Discord's API
+- If a command doesn't exist in the guild, it will fail gracefully
+
+### Parameter Types
+- The function automatically matches parameter types from the command schema
+- Common types include:
+  - Type 3: String
+  - Type 4: Integer
+  - Type 5: Boolean
+  - Type 6: User
+  - Type 7: Channel
+  - Type 8: Role
+
+### Error Handling
+- Always wrap `exec_slash` calls in try-except blocks
+- Log errors using the standard logging pattern
+- Provide user feedback when commands fail
+
+## 4.9.5 Best Practices
+
+1. **Store Bot IDs in Configuration**
+   ```python
+   # Initialize in your script_function
+   if not getConfigData().get("target_bot_id"):
+       updateConfigData("target_bot_id", "123456789012345678")
+   ```
+
+2. **Validate Command Availability**
+   ```python
+   # Check if the bot is in the guild before executing
+   if ctx.guild:
+       guild_members = [m.id for m in ctx.guild.members]
+       bot_id_int = int(bot_id)
+       if bot_id_int not in guild_members:
+           await ctx.send("That bot is not in this server.")
+           return
+   ```
+
+3. **Add Delays for Sequential Commands**
+   ```python
+   await exec_slash(ctx, bot_id, "command1")
+   await asyncio.sleep(1)  # Wait before next command
+   await exec_slash(ctx, bot_id, "command2")
+   ```
+
+4. **Document Required Bot IDs**
+   ```python
+   def script_function():
+       """
+       AUTO SLASH EXECUTOR
+       ------------------
+
+       Automatically executes slash commands from other bots.
+
+       SETUP:
+       1. Find the target bot's application ID
+       2. Set it using: <p>setbotid <application_id>
+
+       COMMANDS:
+       <p>exec <command> - Execute a slash command
+
+       NOTES:
+       - The target bot must be in the same server
+       - Requires Developer Mode to find application IDs
+       """
+   ```
+
+5. **Handle Missing Parameters Gracefully**
+   ```python
+   @bot.command(name="exec")
+   async def execute_command(ctx, *, args: str):
+       await ctx.message.delete()
+
+       if not args:
+           await ctx.send("Usage: `<p>exec <command> [parameters]`")
+           return
+
+       bot_id = getConfigData().get("target_bot_id")
+       if not bot_id:
+           await ctx.send("Bot ID not configured. Use `<p>setbotid <id>`")
+           return
+
+       await exec_slash(ctx, bot_id, args)
+   ```
+
+## 4.9.6 Security Considerations
+
+- **Bot Permissions**: The executed command runs with the permissions of the target bot, not your selfbot
+- **Command Visibility**: Slash command executions are visible to all users in the channel
+- **Rate Limits**: Excessive command execution may trigger Discord's rate limiting
+- **Bot Bans**: Automating bot commands may violate some bots' terms of service
+
+## 4.9.7 Troubleshooting
+
+### "Could not find command" Error
+- Verify the bot is in the guild
+- Check that the command name is spelled correctly
+- Ensure the command is actually a slash command (not a prefix command)
+
+### "Failed to execute" Error
+- Check Discord's Developer Console for detailed errors
+- Verify you have permission to use the command in that channel
+- Ensure all required parameters are provided
+
+### Commands Execute But Nothing Happens
+- Some bots may require specific permissions
+- The bot may be rate-limited or offline
+- Check if the bot sends a response to a different channel
+
+## 5. Asynchronous Operations
+
+NightyScript is built on `asyncio`. Blocking operations (like long-running computations, standard file I/O, or network requests using `requests`) will freeze the bot. Always use asynchronous alternatives when possible.
+
+### 5.1 HTTP Requests with aiohttp
+
+**`aiohttp` (NOT Recommended for HTTP Requests):**
+   Use `aiohttp` for non-blocking web requests within `async` functions.
+
+   ```python
+   import aiohttp
+   import asyncio
+
+   async def fetch_data(url):
+       headers = {
+           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+       }
+       try:
+           async with aiohttp.ClientSession(headers=headers) as session:
+               async with session.get(url, timeout=10) as response: # Add a timeout
+                   response.raise_for_status() # Raise exception for bad status codes
+                   # Use await response.json() for JSON, await response.text() for text
+                   data = await response.json()
+                   script_log(f"Successfully fetched data from {url}", level="INFO")
+                   return data
+       except aiohttp.ClientError as e:
+           script_log(f"aiohttp error fetching {url}: {e}", level="ERROR")
+           return None
+       except asyncio.TimeoutError:
+           script_log(f"Timeout fetching {url}", level="ERROR")
+           return None
+       except Exception as e:
+            script_log(f"Unexpected error fetching {url}: {e}", level="ERROR", exc_info=True)
+            return None
+
+   # Usage in a command:
+   @bot.command(name="getapi")
+   async def get_api_data(ctx, *, api_url: str):
+        await ctx.message.delete()
+        data = await fetch_data(api_url)
+        if data:
+            await ctx.send(f"Data received: ```json\n{json.dumps(data, indent=2)[:1900]}```") # Send preview
+        else:
+            await ctx.send("Failed to fetch data from the API.")
+
+   ```
+
+### 5.2 Using Synchronous Libraries Safely
+
+**`requests` (Use with `run_in_thread`):**
+   If you must use the synchronous `requests` library (or another blocking library), wrap the call in `run_in_thread` (defined in Section 4.7 Webhooks).
+
+   ```python
+   import requests
+
+   # (run_in_thread definition needed - see Section 4.7)
+
+   def sync_request_function(url):
+       headers = {
+           "User-Agent": "Mozilla/5.0 ..." # Set User-Agent
+       }
+       try:
+           response = requests.get(url, headers=headers, timeout=10)
+           response.raise_for_status()
+           return response.json()
+       except requests.exceptions.RequestException as e:
+           script_log(f"requests error fetching {url}: {e}", level="ERROR") # Use your script_log
+           return None
+
+   # Usage in an async command:
+   @bot.command(name="getsync")
+   async def get_sync_data(ctx, *, api_url: str):
+       await ctx.message.delete()
+       msg = await ctx.send(f"Fetching data from {api_url}...")
+       # Call the synchronous function using the async helper
+       data = await run_in_thread(sync_request_function, api_url)
+       if data:
+           await msg.edit(content=f"Sync data received: ```json\n{json.dumps(data, indent=2)[:1900]}```")
+       else:
+           await msg.edit(content="Failed to fetch sync data.")
+   ```
+
+### 5.3 Non-blocking Delays
+
+**`asyncio.sleep()`:**
+   Use `asyncio.sleep(seconds)` instead of `time.sleep(seconds)` for non-blocking pauses within `async` functions.
+
+   ```python
+   async def delayed_action(ctx):
+       await ctx.send("Action starting...")
+       await asyncio.sleep(5) # Wait 5 seconds without blocking
+       await ctx.send("Action complete after 5 seconds.")
+   ```
+
+### 5.4 Asynchronous File I/O
+
+**Asynchronous File I/O (`aiofiles` - **Not Recommended if Not Built-in**):**
+   Standard Python file operations (`open()`, `read()`, `write()`) are blocking. If you need high-performance async file I/O, the `aiofiles` library is standard, *however*, since external packages cannot be installed, rely on `run_in_thread` for file operations if they might block significantly (e.g., writing very large files). For typical config/JSON reads/writes, the blocking time is usually negligible.
+
+   ```python
+   import json
+   # (run_in_thread definition needed)
+   # (load_data / save_data definitions from Section 4.2)
+
+   # Example: Saving large data potentially could block
+   async def save_large_data_async(data):
+       script_log("Saving large data asynchronously...", level="INFO")
+       success = await run_in_thread(save_data, data) # Assuming save_data is the sync function from 4.2
+       if success:
+           script_log("Large data saved.", level="INFO")
+       else:
+           script_log("Failed to save large data.", level="ERROR")
+
+   ```
+
+**Key Takeaway**: Identify blocking operations. Use `aiohttp` for web requests. Use `asyncio.sleep` for delays. Wrap other blocking calls (like `requests` or potentially heavy file I/O) in `run_in_thread`.
+
+## 6. Common Script Patterns
+
+NightyScript can be used to create various types of useful scripts:
+
+### 6.1 API Clients
+Interact with external web services (weather, stocks, game stats, translation). Use `aiohttp` or `requests`+`run_in_thread`. Store API keys in config.
+
+### 6.2 Auto-Responders/Triggers
+Listen for keywords (`on_message`) or reactions (`on_reaction_add`) and perform actions. Use filtering (Section 4.5) heavily.
+
+### 6.3 Event Loggers
+Monitor events (`on_message_delete`, `on_message_edit`, `on_voice_state_update`) and log details to a channel (using `forwardEmbedMethod`) or webhook. Use filtering.
+
+### 6.4 Utility Commands
+Provide tools for users (e.g., user info lookup, calculations, reminders, managing script settings).
+
+### 6.5 Data Management
+Scripts focused on loading, saving, and managing data stored in JSON files, often with commands to add/remove/list items.
+
+### 6.6 User and Member Interaction
+Work with specific, accessible users - not global user databases. Due to Discord API limitations (as noted in Section 1), scripts cannot scan across all servers for mutual friends or build comprehensive user databases. Instead, focus on interacting with users who send messages in accessible channels or are explicitly specified by ID.
+
+**Originally by:** __thedorekaczynski__
+
+
+
+
+
+
+
+
+
+# Nighty UI Scripting Framework Reference v1.1
+
+**Created by:** thatdudepyro using https://claude.ai
+
+**Last Updated:** September 2025
+
+---
+
+## 1. Overview
+
+Nighty UI Scripting is a Python-based framework for creating dynamic custom tabs within the Nighty Discord selfbot application. Scripts use a hierarchical component structure to build responsive layouts with interactive elements.
+
+**Core Principle**: Components must be created through parent methods, never directly instantiated.
+
+### 1.1 Prohibited Patterns
+
+The following will cause script failure:
+
+```python
+# NEVER do this - Direct instantiation is forbidden
+tab = Tab()
+container = CardContainer()
+card = Card()
+group = Group()
+element = UI.Text()
+```
+
+Always use parent creation methods:
+```python
+# CORRECT - Use parent methods
+tab = Tab(name="MyTab")
+container = tab.create_container()
+card = container.create_card()
+group = card.create_group()
+element = card.create_ui_element(UI.Text, content="Hello")
+```
+
+### 1.2 Critical Requirements
+
+* **Hierarchy Enforcement**: Tab → CardContainer → Card → UI Elements/Groups
+* **Unique Names**: Tab names must be unique across the entire UI (max 36 characters)
+* **Final Render**: Always call `tab.render()` as the last step
+* **At Least One Container**: Every Tab requires at least one CardContainer
+* **No Card Nesting**: Cards cannot contain other Cards
+
+### 1.3 Framework Limitations
+
+* CardContainer nesting beyond 3 levels degrades UI performance
+* Limited to 39 predefined icons for tabs
+* Cards must be direct children of CardContainers only
+* UI Elements must be direct children of Cards or Groups
+
+---
+
+## 2. Component Hierarchy
+
+### 2.1 Required Structure
+
+```python
+Tab (Root - Required)
+├── CardContainer (At least 1 required)
+│   ├── Card (Content container)
+│   │   ├── Group (Optional organizer)
+│   │   │   ├── UI Elements
+│   │   │   └── Nested Groups (unlimited depth)
+│   │   └── Direct UI Elements
+│   └── Nested CardContainers (max 3 levels)
+└── Additional CardContainers
+```
+
+### 2.2 Layout Philosophy
+
+The framework uses flexbox-based layouts:
+- **Containers**: Manage spatial arrangement of Cards
+- **Cards**: Primary content holders with alignment control
+- **Groups**: Organize UI elements into logical units
+- **Elements**: Interactive components (buttons, inputs, text, etc.)
+
+---
+
+## 3. Core Components
+
+### 3.1 Tab Class (Root Component)
+
+The top-level container representing a custom tab in Nighty's interface.
+
+```python
+tab = Tab(
+    name="UniqueTabName",        # Required: string, max 36 chars, globally unique
+    icon="users",                # Optional: predefined icon (see Section 3.1.1)
+    gap=6,                       # Optional: 0-10, spacing between containers
+    title="Display Title"        # Optional: shown above cards
+)
+
+# Methods
+container = tab.create_container(type="columns", **kwargs)
+tab.toast(title="Alert", description="Message", type="INFO")  # All three params required. type: "INFO"|"ERROR"|"SUCCESS"
+tab.render()  # REQUIRED - call after all elements are defined
+```
+
+**Parameters**:
+- `name` (Required): Unique identifier, max 36 characters
+- `icon` (Optional): Visual tab icon from predefined set
+- `gap` (Optional, 0-10, default 6): Spacing between CardContainer elements
+- `title` (Optional): Display title shown above cards
+
+**Methods**:
+- `create_container(type, **kwargs)`: Creates CardContainer instances
+- `render()`: Initializes the tab (mandatory final step)
+- `toast(title, description, type)`: Shows notifications. All three parameters are required.
+
+#### 3.1.1 Available Icons (39 Total)
+
+report, chart, two_way, inbox, star, search, variants, message, users, history, clean, magic, eraser, convert, cloud, calc, calendar, key, gift, trophy, book, sun, cart, pill, bookmark, mail, bear, heart, music, umbrella, tube, palette, lock, fire, preferences, power, share, bell, trash, nitro
+
+### 3.2 CardContainer Class (Layout Manager)
+
+Manages spatial arrangement of Card components using flexbox layouts.
+
+```python
+# Created via tab.create_container() or container.create_container()
+container = parent.create_container(
+    type="columns",              # "columns"|"rows", default "columns"
+    width="full",               # "auto"|"full", default "full"
+    height="full",              # "auto"|"full", default "full"
+    gap=6                       # 0-10, default 6
+)
+
+# Methods
+nested_container = container.create_container(type="rows", **kwargs)
+card = container.create_card(**kwargs)
+```
+
+**Layout Types**:
+- `"columns"`: Horizontal arrangement (side-by-side)
+- `"rows"`: Vertical arrangement (stacked)
+
+**Size Control**:
+- `"auto"`: Size based on content
+- `"full"`: Occupy all available space
+
+### 3.3 Card Class (Content Container)
+
+Primary content container that houses UI elements and Groups.
+
+```python
+# Created via container.create_card()
+card = container.create_card(
+    type="columns",              # "columns"|"rows", default "columns"
+    height="full",              # "auto"|"full", default "full"
+    width="full",               # "auto"|"full", default "full"
+    vertical_align="start",     # "start"|"center"|"end", default "start"
+    horizontal_align="start",   # "start"|"center"|"end", default "start"
+    gap=6,                      # 0-10, default 6
+    disallow_shrink=False       # True|False, prevents auto-resizing
+)
+
+# Methods
+group = card.create_group(type="columns", **kwargs)
+element = card.create_ui_element(UI.Text, content="Hello", **kwargs)
+```
+
+**Alignment Options**:
+- `"start"`: Align to beginning (top/left)
+- `"center"`: Center alignment
+- `"end"`: Align to end (bottom/right)
+
+### 3.4 Group Class (Element Organizer)
+
+Organizes multiple UI elements into cohesive units within Cards.
+
+```python
+# Created via card.create_group() or group.create_group()
+group = parent.create_group(
+    type="columns",              # "columns"|"rows", default "columns"
+    vertical_align="start",     # "start"|"center"|"end", default "start"
+    horizontal_align="start",   # "start"|"center"|"end", default "start"
+    gap=6,                      # 0-10, default 6
+    full_width=False            # True|False, forces full width
+)
+
+# Methods
+nested_group = group.create_group(type="rows", **kwargs)
+element = group.create_ui_element(UI.Button, label="Click", **kwargs)
+```
+
+**Nesting**: Groups support unlimited nesting depth for complex layouts.
+
+---
+
+## 4. UI Elements
+
+All UI elements are created via `parent.create_ui_element(UI.ElementType, **kwargs)` where parent is a Card or Group.
+
+### 4.1 UI.Text
+
+Text display component with comprehensive typography control.
+
+```python
+text = parent.create_ui_element(UI.Text,
+    content="Hello World\nNew line",    # string, use \n for line breaks
+    size="base",                        # "tiny"|"sm"|"base"|"lg"|"xl"|"2xl"
+    weight="normal",                    # "thin"|"light"|"normal"|"medium"|"bold"|"extrabold"|"black"
+    color="#FFFFFF",                    # CSS color value
+    align="left",                       # "left"|"center"|"right"
+    margin="m-0",                       # Tailwind margin classes
+    visible=True                        # True|False
+)
+
+# All attributes are read/write
+text.content = "Updated text"
+text.size = "xl"
+```
+
+### 4.2 UI.Button
+
+Interactive button component with event handling and visual variants.
+
+```python
+button = parent.create_ui_element(UI.Button,
+    label="Click Me",                   # string
+    variant="solid",                    # "solid"|"bordered"|"ghost"|"light"|"flat"|"cta"
+    color="primary",                    # "primary"|"default"|"success"|"danger" (ignored if variant="cta")
+    size="md",                          # "sm"|"md"
+    full_width=False,                   # True|False
+    disabled=False,                     # True|False
+    loading=False,                      # True|False, shows spinner
+    margin="m-0",                       # Tailwind margin classes
+    visible=True                        # True|False
+)
+
+# Event handling (supports async functions)
+def click_handler():
+    button.loading = True
+    # Perform work...
+    button.loading = False
+
+async def async_click_handler():
+    button.loading = True
+    # Async work like API calls...
+    button.loading = False
+
+button.onClick = click_handler  # or async_click_handler
+```
+
+### 4.3 UI.Input
+
+Text input field with validation and state management.
+
+```python
+input_field = parent.create_ui_element(UI.Input,
+    label="Email",                      # string|None
+    placeholder="Enter email...",       # string|None
+    value="",                          # string|None, current value
+    description="Help text",           # string|None
+    show_clear_button=False,           # True|False
+    invalid=False,                     # True|False, validation state
+    disabled=False,                    # True|False
+    readonly=False,                    # True|False
+    required=False,                    # True|False
+    full_width=False,                  # True|False
+    error_message="Error text",        # string|None
+    margin="m-0",                      # Tailwind margin classes
+    visible=True                       # True|False
+)
+
+# Event handling
+def on_input_change(value):
+    print(f"Input changed to: {value}")
+
+input_field.onInput = on_input_change
+# Access current value: input_field.value
+```
+
+### 4.4 UI.Image
+
+Image display component with styling and layout options.
+
+```python
+image = parent.create_ui_element(UI.Image,
+    url="https://example.com/image.jpg", # Required: valid URL
+    alt="Description",                   # string, default "Image"
+    circle=False,                       # True|False, circular cropping
+    shadow=False,                       # True|False, drop shadow
+    width="auto",                       # "50%"|"75px"|"auto"
+    height="auto",                      # "50%"|"75px"|"auto"
+    rounded="md",                       # "none"|"sm"|"md"|"lg"|"xl"|"2xl"
+    fill_type="contain",               # "cover"|"contain"
+    border_color="#FFFFFF",            # CSS color value
+    border_width=0,                    # 0-10
+    margin="m-0",                      # Tailwind margin classes
+    visible=True                       # True|False
+)
+```
+
+### 4.5 UI.Toggle
+
+Binary toggle switch component.
+
+```python
+toggle = parent.create_ui_element(UI.Toggle,
+    label="Enable feature",            # string
+    checked=False,                     # True|False, toggle state
+    disabled=False,                    # True|False
+    visible=True                       # True|False
+)
+
+# Event handling
+def on_toggle_change(checked):
+    print(f"Toggle is now: {checked}")
+
+toggle.onChange = on_toggle_change
+```
+
+### 4.6 UI.Select
+
+Dropdown selection component supporting single/multiple selection modes.
+
+```python
+select = parent.create_ui_element(UI.Select,
+    label="Choose option",             # Required: string
+    items=[                           # Required: list of dicts
+        {
+            "id": "option1",          # Required: unique string
+            "title": "Option 1",      # Required: display text
+            "iconUrl": "https://..."  # Optional: icon URL
+        },
+        {"id": "option2", "title": "Option 2"}
+    ],
+    selected_items=["option1"],        # list of IDs currently selected
+    disabled_items=[],                 # list of IDs to disable
+    mode="single",                     # "single"|"multiple"
+    description="Help text",           # string|None
+    loading=False,                     # True|False, loading state
+    disabled=False,                    # True|False
+    invalid=False,                     # True|False, validation state
+    error_message="Error text",        # string|None
+    full_width=False,                  # True|False
+    margin="m-0",                      # Tailwind margin classes
+    visible=True                       # True|False
+)
+
+# Event handling
+def on_selection_change(selected_items):
+    print(f"Selected: {selected_items}")
+
+select.onChange = on_selection_change
+```
+
+**Important**: All item IDs must be unique to prevent rendering issues.
+
+### 4.7 UI.Checkbox
+
+Binary checkbox input component.
+
+```python
+checkbox = parent.create_ui_element(UI.Checkbox,
+    label="I agree",                   # Required: string
+    checked=False,                     # True|False, checked state
+    disabled=False,                    # True|False
+    invalid=False,                     # True|False, validation state
+    visible=True                       # True|False
+)
+
+# Event handling
+def on_checkbox_change(checked):
+    print(f"Checkbox is: {checked}")
+
+checkbox.onChange = on_checkbox_change
+```
+
+### 4.8 UI.Table
+
+Complex data table component with search, pagination, and selection capabilities.
+
+```python
+table = parent.create_ui_element(UI.Table,
+    columns=[                          # Required: list of column definitions
+        {
+            "type": "text",            # "tag"|"text"|"button"
+            "label": "Name",           # Column header
+        },
+        {
+            "type": "button",
+            "label": "Actions",
+            "buttons": [               # For "button" type columns
+                {
+                    "label": "Edit",
+                    "color": "default", # "default"|"danger"
+                    "onClick": edit_function
+                }
+            ]
+        }
+    ],
+    rows=[                            # List of row data
+        {
+            "id": "row1",             # Required: unique ID per row
+            "cells": [                # Must match column structure
+                {"text": "John", "subtext": "Admin", "imageUrl": "url"}, # text type
+                {"text": "Active", "color": "green"},                    # tag type
+                {}                                                       # button type
+            ]
+        }
+    ],
+    search=True,                      # True|False, enable search
+    items_per_page=50,               # int, pagination size
+    selectable=False,                # True|False, row selection
+    visible=True                     # True|False
+)
+
+# Event handling
+def on_selection_change(selected_row_ids):
+    print(f"Selected rows: {selected_row_ids}")
+
+table.onSelectionChange = on_selection_change
+```
+
+**Column Types**:
+- `"text"`: Display text with optional subtext and image
+- `"tag"`: Colored label display
+- `"button"`: Action buttons with click handlers
+
+---
+
+## 5. Shared Attributes
+
+### 5.1 Gap Property
+
+Universal spacing control between child elements (range 0-10):
+- `0`: No spacing
+- `10`: Maximum spacing
+- Applied to: Tab, CardContainer, Card, Group
+
+### 5.2 Margin Property
+
+Tailwind CSS margin class support:
+- Available prefixes: `m-` `mt-` `mr-` `mb-` `ml-` `mx-` `my-`
+- Range: 0-10 (e.g., `"m-4"`, `"mx-3"`, `"mb-2"`)
+- Applied to: All UI Elements
+
+**Examples**:
+- `"m-4"`: 4 units margin on all sides
+- `"mx-3"`: 3 units margin on left and right
+- `"mt-2"`: 2 units margin on top
+
+### 5.3 Visible Property
+
+Universal visibility control:
+- `True`: Element is displayed
+- `False`: Element is hidden
+- Applied to: All UI Elements
+
+---
+
+## 6. Common Layout Patterns
+
+### 6.1 Basic Single Card Layout
+
+```python
+tab = Tab(name="SimpleTab")
+container = tab.create_container()
+card = container.create_card()
+card.create_ui_element(UI.Text, content="Hello World")
+tab.render()
+```
+
+### 6.2 Two Column Layout
+
+```python
+tab = Tab(name="TwoColumns")
+container = tab.create_container(type="columns")
+
+# Left column
+left_card = container.create_card()
+left_card.create_ui_element(UI.Text, content="Left Content")
+
+# Right column
+right_card = container.create_card()
+right_card.create_ui_element(UI.Text, content="Right Content")
+
+tab.render()
+```
+
+### 6.3 Form with Grouped Elements
+
+```python
+tab = Tab(name="ContactForm")
+container = tab.create_container()
+card = container.create_card(vertical_align="center", horizontal_align="center")
+
+# Form title
+card.create_ui_element(UI.Text, content="Contact Information", size="xl", weight="bold")
+
+# Input and button in same row using group
+input_group = card.create_group(type="columns", gap=2)
+email_input = input_group.create_ui_element(UI.Input,
+    label="Email",
+    placeholder="your@email.com",
+    full_width=True
+)
+submit_button = input_group.create_ui_element(UI.Button,
+    label="Submit",
+    variant="cta"
+)
+
+def handle_submit():
+    email = email_input.value
+    if email:
+        submit_button.loading = True
+        # Process submission...
+        submit_button.loading = False
+    else:
+        email_input.invalid = True
+        email_input.error_message = "Email is required"
+
+submit_button.onClick = handle_submit
+tab.render()
+```
+
+### 6.4 Complex Nested Layout
+
+```python
+tab = Tab(name="Dashboard", icon="chart")
+
+# Main container with side-by-side layout
+main_container = tab.create_container(type="columns")
+
+# Left sidebar with vertical stack
+sidebar_container = main_container.create_container(type="rows")
+sidebar_container.width = "auto"  # Let it size based on content
+
+# Navigation card
+nav_card = sidebar_container.create_card()
+nav_card.create_ui_element(UI.Text, content="Navigation", size="lg", weight="bold")
+nav_card.create_ui_element(UI.Button, label="Dashboard", variant="ghost", full_width=True)
+nav_card.create_ui_element(UI.Button, label="Reports", variant="ghost", full_width=True)
+
+# Settings card
+settings_card = sidebar_container.create_card()
+settings_card.create_ui_element(UI.Text, content="Settings", size="lg", weight="bold")
+settings_card.create_ui_element(UI.Toggle, label="Dark Mode")
+settings_card.create_ui_element(UI.Toggle, label="Notifications")
+
+# Main content area
+content_card = main_container.create_card()
+content_card.create_ui_element(UI.Text, content="Main Content Area", size="2xl")
+
+tab.render()
+```
+
+### 6.5 Interactive Data Table
+
+```python
+def edit_user():
+    print("Edit user clicked")
+
+def delete_user():
+    print("Delete user clicked")
+
+table = card.create_ui_element(UI.Table,
+    columns=[
+        {"type": "text", "label": "User"},
+        {"type": "tag", "label": "Status"},
+        {"type": "button", "label": "Actions", "buttons": [
+            {"label": "Edit", "color": "default", "onClick": edit_user},
+            {"label": "Delete", "color": "danger", "onClick": delete_user}
+        ]}
+    ],
+    rows=[
+        {"id": "user1", "cells": [
+            {"text": "John Doe", "subtext": "Administrator", "imageUrl": "https://example.com/avatar1.png"},
+            {"text": "Active", "color": "green"},
+            {}  # Button column cells are empty
+        ]},
+        {"id": "user2", "cells": [
+            {"text": "Jane Smith", "subtext": "User"},
+            {"text": "Inactive", "color": "red"},
+            {}
+        ]}
+    ],
+    search=True,
+    selectable=True,
+    items_per_page=25
+)
+
+def on_user_selection(selected_ids):
+    print(f"Selected users: {selected_ids}")
+
+table.onSelectionChange = on_user_selection
+```
+
+---
+
+## 7. Best Practices
+
+### 7.1 Component Creation
+
+1. **Always use parent methods**: Never instantiate components directly
+2. **Unique identification**: Ensure Tab names and table/select item IDs are unique
+3. **Proper nesting**: Follow the required hierarchy strictly
+4. **Final render**: Always call `tab.render()` as the last step
+
+### 7.2 Layout Design
+
+1. **Container limits**: Avoid nesting CardContainers beyond 3 levels
+2. **Responsive sizing**: Mix `"auto"` and `"full"` width/height for responsive behavior
+3. **Alignment control**: Use alignment properties for precise positioning
+4. **Gap management**: Use consistent gap values for visual cohesion
+
+### 7.3 Event Handling
+
+1. **Async support**: Event handlers can be synchronous or asynchronous functions
+2. **Loading states**: Use loading attributes for buttons during async operations
+3. **Validation feedback**: Use invalid/error_message attributes for form validation
+4. **State management**: Leverage read/write attributes for dynamic UI updates
+
+### 7.4 Performance Considerations
+
+1. **Efficient filtering**: Use conditional rendering with the `visible` attribute
+2. **Minimal nesting**: Keep component hierarchy as flat as reasonable
+3. **Event optimization**: Avoid heavy computations in event handlers
+4. **State batching**: Update multiple attributes together when possible
+
+---
+
+## 8. Common Pitfalls
+
+### 8.1 Creation Errors
+
+```python
+# WRONG - Direct instantiation
+tab = Tab()
+
+# CORRECT - Proper instantiation
+tab = Tab(name="MyTab")
+```
+
+### 8.2 Hierarchy Violations
+
+```python
+# WRONG - Card nested in Card
+outer_card = container.create_card()
+inner_card = outer_card.create_card()  # Not allowed!
+
+# CORRECT - Use Groups for organization
+outer_card = container.create_card()
+group = outer_card.create_group()
+```
+
+### 8.3 Missing Required Parameters
+
+```python
+# WRONG - Missing required parameters
+select = card.create_ui_element(UI.Select)  # Missing label
+
+# CORRECT - Include required parameters
+select = card.create_ui_element(UI.Select, label="Choose Option", items=[])
+```
+
+### 8.4 Forgetting Final Render
+
+```python
+tab = Tab(name="MyTab")
+container = tab.create_container()
+card = container.create_card()
+# WRONG - Missing tab.render()
+
+# CORRECT - Always include final render
+tab.render()
+```
+
+---
+
+## 9. Debugging Tips
+
+### 9.1 Component Verification
+
+1. **Check hierarchy**: Ensure proper parent-child relationships
+2. **Verify unique IDs**: Confirm all Tab names and item IDs are unique
+3. **Validate parameters**: Check that all required parameters are provided
+4. **Test incrementally**: Build UI step by step to isolate issues
+
+### 9.2 Layout Debugging
+
+1. **Gap visualization**: Use different gap values to see spacing
+2. **Alignment testing**: Try different alignment combinations
+3. **Size debugging**: Switch between "auto" and "full" sizing
+4. **Container inspection**: Check container types and nesting levels
+
+### 9.3 Event Debugging
+
+1. **Console logging**: Add print statements in event handlers
+2. **State inspection**: Check attribute values before/after events
+3. **Async handling**: Ensure async functions are properly awaited
+4. **Error catching**: Wrap event handlers in try-catch blocks
+
+---
+
+This reference provides complete coverage of the Nighty UI Scripting framework for AI assistants helping users create dynamic, interactive custom tabs within the Nighty Discord selfbot application.

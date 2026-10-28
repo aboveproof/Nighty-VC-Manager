@@ -43,7 +43,7 @@ The stream and camera controls update Discord voice-state flags. Actual media be
 
 ### Channel information
 
-- Paginated participant list with three users per page
+- Fixed-height participant list with up to five users per page
 - Compact participant IDs
 - Active voice flags shown as `Mute | Deaf | Stream | Camera`
 - Channel telemetry for bitrate, region, user limit, occupancy, and channel ID
@@ -62,6 +62,9 @@ The stream and camera controls update Discord voice-state flags. Actual media be
 
 - Add secondary Discord accounts by token and label
 - Join or leave all managed accounts together
+- Join or leave one managed account directly from its table row
+- Mirror the primary mute, deafen, stream, and camera controls to connected accounts
+- Override mute, deafen, stream, or camera for one account from its table row
 - View each account's channel and connection state
 - Paginated managed-account list
 - Remove individual accounts from the manager
@@ -144,6 +147,7 @@ The script registers `/vc` after Nighty finishes connecting. If Discord does not
 | `/vc list` | None | List users in the managed voice channel. |
 | `/vc history` | None | Show the five most recent tracked sessions. |
 | `/vc status` | None | Show the managed connection state. |
+| `/vc stats` | None | Show total voice time, session statistics, and managed-account usage. |
 | `/vc settings` | Optional booleans | View or change slash-response settings. |
 | `/vc help` | None | Show the command list. |
 

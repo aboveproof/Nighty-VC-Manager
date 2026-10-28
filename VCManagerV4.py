@@ -6,7 +6,7 @@
     name="VC Manager V4",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
-    usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|settings|help>"
+    usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
 )
 def vc_manager_farm_script():
     """
@@ -26,6 +26,7 @@ def vc_manager_farm_script():
     /vc list                - List current participants
     /vc history             - Show recent session history
     /vc status              - Show the managed connection state
+    /vc stats               - Show tracked voice usage statistics
     /vc settings            - View or update slash-response settings
     /vc help                - Show the command overview
 
@@ -739,10 +740,11 @@ def vc_manager_farm_script():
                     </div>
                     <button type="button" data-managed-action-proxy onclick="${on_action}" style="display: none;"></button>
                     <div style="display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; width: 100%; padding: 12px; background: rgba(255,255,255,0.035); border-radius: 10px;">
-                        <div style="display: grid; grid-template-columns: minmax(0,1.35fr) minmax(0,1fr) minmax(90px,.65fr) 88px; gap: 14px; padding: 10px 12px; background: rgba(255,255,255,0.07); border-radius: 8px; font-weight: 700;">
+                        <div style="display: grid; grid-template-columns: minmax(150px,1.25fr) minmax(110px,.8fr) minmax(90px,.55fr) minmax(300px,1.35fr) 210px; gap: 12px; padding: 10px 12px; background: rgba(255,255,255,0.07); border-radius: 8px; font-weight: 700;">
                             <span>Account</span>
                             <span>Channel</span>
                             <span>Status</span>
+                            <span>Voice Controls</span>
                             <span>Action</span>
                         </div>
                         <div data-managed-rows style="display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;"></div>
@@ -1024,7 +1026,7 @@ def vc_manager_farm_script():
 
         const participantPager = window.VCParticipantPager || { states: {} };
         participantPager.states = participantPager.states || {};
-        participantPager.pageSize = 3;
+        participantPager.pageSize = 5;
         participantPager.update = function(pagerId, rows) {
             const previous = this.states[pagerId] || { page: 0 };
             const nextRows = Array.isArray(rows) ? rows : [];
@@ -1132,13 +1134,25 @@ def vc_manager_farm_script():
             this.states[pagerId] = state;
             this.render(pagerId);
         };
-        managedPager.action = function(pagerId, rowId) {
+        managedPager.action = function(pagerId, rowId, actionName) {
             const root = document.getElementById(pagerId);
             const proxy = root ? root.querySelector('[data-managed-action-proxy]') : null;
             if (!proxy) return;
-            proxy.value = rowId;
+            proxy.value = JSON.stringify({
+                id: String(rowId || ''),
+                action: String(actionName || 'account')
+            });
             proxy.click();
         };
+        managedPager.closeMenus = function() {
+            document.querySelectorAll('[data-managed-token-menu]').forEach(menu => {
+                menu.style.display = 'none';
+            });
+        };
+        if (!managedPager.dismissHandlerBound) {
+            document.addEventListener('click', () => managedPager.closeMenus());
+            managedPager.dismissHandlerBound = true;
+        }
         managedPager.render = function(pagerId) {
             const root = document.getElementById(pagerId);
             if (!root) return;
@@ -1176,7 +1190,7 @@ def vc_manager_farm_script():
 
             pageRows.forEach(item => {
                 const row = document.createElement('div');
-                row.style.cssText = 'display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr) minmax(90px,.65fr) 88px;gap:14px;align-items:center;min-height:76px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);box-sizing:border-box;';
+                row.style.cssText = 'display:grid;grid-template-columns:minmax(150px,1.25fr) minmax(110px,.8fr) minmax(90px,.55fr) minmax(300px,1.35fr) 210px;gap:12px;align-items:center;min-height:76px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);box-sizing:border-box;';
 
                 const identity = document.createElement('div');
                 identity.style.cssText = 'display:flex;align-items:center;gap:10px;min-width:0;';
@@ -1220,15 +1234,87 @@ def vc_manager_farm_script():
                     statusError.style.cssText = 'font-size:10px;line-height:1.2;opacity:.68;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;';
                     status.appendChild(statusError);
                 }
-                const action = document.createElement('button');
-                action.type = 'button';
-                action.textContent = item.connected ? 'Leave' : 'Remove';
-                action.disabled = item.removable === false;
-                action.style.cssText = 'border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;';
-                action.style.opacity = action.disabled ? '0.45' : '1';
-                action.style.cursor = action.disabled ? 'not-allowed' : 'pointer';
-                action.onclick = () => this.action(pagerId, item.id);
-                row.append(identity, channel, status, action);
+
+                const controls = document.createElement('div');
+                controls.style.cssText = 'display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:nowrap;';
+                const controlItems = [
+                    ['mute', 'Mute', Boolean(item.muted)],
+                    ['deaf', 'Deafen', Boolean(item.deafened)],
+                    ['stream', 'Stream', Boolean(item.streaming)],
+                    ['video', 'Camera', Boolean(item.camera_on)]
+                ];
+                controlItems.forEach(([controlName, label, active]) => {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.textContent = label;
+                    button.disabled = !item.connected;
+                    button.title = item.connected
+                        ? `${active ? 'Disable' : 'Enable'} ${label.toLowerCase()} for ${item.name || 'this account'}`
+                        : 'Connect this account before changing its voice controls';
+                    button.style.cssText = 'border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:7px 9px;font-size:11px;font-weight:600;white-space:nowrap;';
+                    button.style.background = active
+                        ? 'rgba(35,145,220,.32)'
+                        : 'rgba(255,255,255,.06)';
+                    button.style.opacity = button.disabled ? '0.42' : '1';
+                    button.style.cursor = button.disabled ? 'not-allowed' : 'pointer';
+                    button.onclick = () => this.action(pagerId, item.id, controlName);
+                    controls.appendChild(button);
+                });
+
+                const action = document.createElement('div');
+                action.style.cssText = 'display:flex;align-items:center;gap:6px;min-width:0;position:relative;';
+
+                const connectionButton = document.createElement('button');
+                connectionButton.type = 'button';
+                connectionButton.textContent = 'Join';
+                connectionButton.disabled = item.removable === false || item.connected;
+                connectionButton.style.cssText = 'border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;min-width:72px;';
+                connectionButton.style.opacity = connectionButton.disabled ? '0.45' : '1';
+                connectionButton.style.cursor = connectionButton.disabled ? 'not-allowed' : 'pointer';
+                connectionButton.onclick = () => this.action(pagerId, item.id, 'join');
+
+                const leaveButton = document.createElement('button');
+                leaveButton.type = 'button';
+                leaveButton.textContent = 'Leave';
+                leaveButton.disabled = item.removable === false || !item.connected;
+                leaveButton.style.cssText = 'border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;min-width:72px;';
+                leaveButton.style.opacity = leaveButton.disabled ? '0.45' : '1';
+                leaveButton.style.cursor = leaveButton.disabled ? 'not-allowed' : 'pointer';
+                leaveButton.onclick = () => this.action(pagerId, item.id, 'leave');
+
+                const menuButton = document.createElement('button');
+                menuButton.type = 'button';
+                menuButton.textContent = String.fromCharCode(8942);
+                menuButton.title = `More actions for ${item.name || 'this account'}`;
+                menuButton.disabled = item.removable === false;
+                menuButton.style.cssText = 'display:flex;align-items:center;justify-content:center;width:34px;height:32px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);border-radius:8px;font-size:20px;line-height:1;cursor:pointer;';
+                menuButton.style.opacity = menuButton.disabled ? '0.45' : '1';
+                menuButton.style.cursor = menuButton.disabled ? 'not-allowed' : 'pointer';
+
+                const tokenMenu = document.createElement('div');
+                tokenMenu.dataset.managedTokenMenu = 'true';
+                tokenMenu.style.cssText = 'display:none;position:absolute;right:0;top:38px;z-index:30;min-width:138px;padding:5px;background:rgba(20,20,22,.98);border:1px solid rgba(255,255,255,.14);border-radius:9px;box-shadow:0 10px 28px rgba(0,0,0,.38);';
+
+                const removeTokenButton = document.createElement('button');
+                removeTokenButton.type = 'button';
+                removeTokenButton.textContent = 'Remove Token';
+                removeTokenButton.style.cssText = 'width:100%;border:0;background:transparent;border-radius:6px;padding:8px 10px;text-align:left;font-size:12px;font-weight:600;cursor:pointer;';
+                removeTokenButton.onclick = event => {
+                    event.stopPropagation();
+                    tokenMenu.style.display = 'none';
+                    this.action(pagerId, item.id, 'remove');
+                };
+                tokenMenu.onclick = event => event.stopPropagation();
+                tokenMenu.appendChild(removeTokenButton);
+                menuButton.onclick = event => {
+                    event.stopPropagation();
+                    const shouldOpen = tokenMenu.style.display === 'none';
+                    this.closeMenus();
+                    tokenMenu.style.display = shouldOpen ? 'block' : 'none';
+                };
+
+                action.append(connectionButton, leaveButton, menuButton, tokenMenu);
+                row.append(identity, channel, status, controls, action);
                 body.appendChild(row);
             });
         };
@@ -2145,10 +2231,16 @@ def vc_manager_farm_script():
                                 self.current_channel_id = str(channel_id) if channel_id else None
                                 self.current_guild_id = str(guild_id) if channel_id and guild_id else None
                                 if not channel_id:
+                                    self.is_muted = False
+                                    self.is_deafened = False
                                     self.is_streaming = False
                                     self.is_camera_on = False
                                     self._set_status("Ready")
                                 else:
+                                    self.is_muted = bool(d.get("self_mute", self.is_muted))
+                                    self.is_deafened = bool(d.get("self_deaf", self.is_deafened))
+                                    self.is_streaming = bool(d.get("self_stream", self.is_streaming))
+                                    self.is_camera_on = bool(d.get("self_video", self.is_camera_on))
                                     self._set_status("Connected")
                         elif op == 7:
                             self._set_status("Reconnecting")
@@ -2293,6 +2385,91 @@ def vc_manager_farm_script():
                 )
             )
             return False
+
+        async def set_voice_controls(self, mute=None, deaf=None, stream=None, video=None):
+            """Update this managed account without changing its voice channel."""
+            if (
+                not self.is_in_vc
+                or not self.current_guild_id
+                or not self.current_channel_id
+                or not self.ws
+                or self.ws.closed
+            ):
+                self._set_status("Not connected", "Connect this account before changing its voice controls.")
+                return False
+
+            requested_changes = (
+                mute is not None and as_bool(mute) != self.is_muted,
+                deaf is not None and as_bool(deaf) != self.is_deafened,
+                stream is not None and as_bool(stream) != self.is_streaming,
+                video is not None and as_bool(video) != self.is_camera_on,
+            )
+            if not any(requested_changes):
+                return True
+
+            old_state = (
+                self.is_muted,
+                self.is_deafened,
+                self.is_streaming,
+                self.is_camera_on,
+            )
+            if mute is not None:
+                self.is_muted = as_bool(mute)
+            if deaf is not None:
+                self.is_deafened = as_bool(deaf)
+            if stream is not None:
+                self.is_streaming = as_bool(stream)
+            if video is not None:
+                self.is_camera_on = as_bool(video)
+
+            try:
+                if mute is not None or deaf is not None or video is not None:
+                    await self.ws.send_json({
+                        "op": 4,
+                        "d": {
+                            "guild_id": str(self.current_guild_id),
+                            "channel_id": str(self.current_channel_id),
+                            "self_mute": self.is_muted,
+                            "self_deaf": self.is_deafened,
+                            "self_video": self.is_camera_on,
+                        }
+                    })
+
+                if stream is not None:
+                    if self.is_streaming:
+                        stream_payload = {
+                            "op": 18,
+                            "d": {
+                                "type": "guild",
+                                "guild_id": str(self.current_guild_id),
+                                "channel_id": str(self.current_channel_id),
+                                "preferred_region": None,
+                            }
+                        }
+                    else:
+                        stream_payload = {
+                            "op": 22,
+                            "d": {
+                                "stream_key": (
+                                    f"guild:{self.current_guild_id}:"
+                                    f"{self.current_channel_id}:{self.user_id}"
+                                )
+                            }
+                        }
+                    await self.ws.send_json(stream_payload)
+            except Exception as e:
+                (
+                    self.is_muted,
+                    self.is_deafened,
+                    self.is_streaming,
+                    self.is_camera_on,
+                ) = old_state
+                print(f"[VC Manager] Voice control update failed for {self.name}: {e}", type_="ERROR")
+                self._set_status("Control failed", "Discord rejected this account's voice control update.")
+                return False
+
+            self._set_status("Connected")
+            return True
 
         async def leave_vc(self):
             if not self.current_guild_id or not self.ws or self.ws.closed:
@@ -2731,8 +2908,48 @@ def vc_manager_farm_script():
         data["settings"]["camera_on"] = is_camera_on
         save_data(data)
 
+        await sync_managed_voice_controls(
+            mute=mute,
+            deaf=deaf,
+            stream=stream,
+            video=video,
+        )
         update_all_ui()
         return True
+
+    async def sync_managed_voice_controls(mute=None, deaf=None, stream=None, video=None):
+        """Mirror requested primary controls to every connected managed account."""
+        clients = [client for client in token_clients.values() if client.is_in_vc]
+        if not clients:
+            return 0, 0
+
+        results = await asyncio.gather(
+            *(
+                client.set_voice_controls(
+                    mute=mute,
+                    deaf=deaf,
+                    stream=stream,
+                    video=video,
+                )
+                for client in clients
+            ),
+            return_exceptions=True,
+        )
+        updated = 0
+        for client, result in zip(clients, results):
+            if result is True:
+                updated += 1
+            elif isinstance(result, Exception):
+                print(
+                    f"[VC Manager] Could not sync voice controls for {client.name}: {result}",
+                    type_="ERROR",
+                )
+                client._set_status(
+                    "Control failed",
+                    "Nighty could not update this account. Open the Nighty console for details.",
+                )
+        update_token_table_rows()
+        return updated, len(clients)
 
     async def connect(guild_id, channel_id):
         nonlocal intentional_disconnect, active_channel
@@ -2879,6 +3096,12 @@ def vc_manager_farm_script():
 
             # Connected or switched
             if new_channel:
+                previous_controls = (
+                    is_muted,
+                    is_deafened,
+                    is_streaming,
+                    is_camera_on,
+                )
                 if old_channel and old_channel.id != new_channel.id and connection_start_time:
                     record_session(old_channel, connection_start_time)
                     set_connection_start(datetime.now())
@@ -2898,6 +3121,20 @@ def vc_manager_farm_script():
                 is_deafened = bool(getattr(after, "self_deaf", False) or getattr(after, "deaf", False))
                 is_streaming = bool(getattr(after, "self_stream", False) or getattr(after, "streaming", False))
                 is_camera_on = bool(getattr(after, "self_video", False))
+
+                current_controls = (
+                    is_muted,
+                    is_deafened,
+                    is_streaming,
+                    is_camera_on,
+                )
+                if current_controls != previous_controls:
+                    await sync_managed_voice_controls(
+                        mute=is_muted,
+                        deaf=is_deafened,
+                        stream=is_streaming,
+                        video=is_camera_on,
+                    )
 
                 update_all_ui()
                 return
@@ -3404,6 +3641,13 @@ def vc_manager_farm_script():
             })
             save_data(data)
             await sync_voice_state(update_ui=True)
+            if joined:
+                await sync_managed_voice_controls(
+                    mute=True,
+                    deaf=True,
+                    stream=stream_started,
+                    video=True,
+                )
 
             if not joined:
                 await ctx.edit_v2("Connection Failed", f"Discord did not confirm **#{target.name}**.")
@@ -3538,6 +3782,64 @@ def vc_manager_farm_script():
                 f"**Session:** {format_duration(session_seconds)}"
             )
 
+        @vc_group.command(name="stats", description="Show tracked VC Manager voice statistics")
+        async def slash_vc_stats(ctx):
+            if not await slash_owner_only(ctx):
+                return
+
+            data = load_data()
+            sessions = [
+                session for session in data.get("sessions", [])
+                if isinstance(session, dict)
+            ]
+            completed_durations = []
+            for session in sessions:
+                try:
+                    duration = max(0.0, float(session.get("duration_seconds", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(duration):
+                    completed_durations.append(duration)
+
+            current = get_current_voice_channel()
+            live_seconds = (
+                max(0.0, (datetime.now() - connection_start_time).total_seconds())
+                if current and connection_start_time else 0.0
+            )
+            try:
+                recorded_total = max(0.0, float(data.get("total_vc_time_seconds", 0) or 0))
+            except (TypeError, ValueError):
+                recorded_total = sum(completed_durations)
+
+            total_seconds = recorded_total + live_seconds
+            longest_seconds = max(completed_durations + ([live_seconds] if live_seconds else []), default=0)
+            average_seconds = (
+                sum(completed_durations) / len(completed_durations)
+                if completed_durations else 0
+            )
+            server_count = len({
+                str(session.get("guild_name") or session.get("guild_id") or "").strip()
+                for session in sessions
+                if str(session.get("guild_name") or session.get("guild_id") or "").strip()
+            })
+            connected_accounts = sum(client.is_in_vc for client in token_clients.values())
+            current_text = (
+                f"#{current.name} in {current.guild.name}"
+                if current else "Disconnected"
+            )
+
+            await ctx.send_v2(
+                "VC Manager Statistics",
+                f"**Total voice time:** {format_duration(total_seconds)}\n"
+                f"**Current session:** {format_duration(live_seconds)}\n"
+                f"**Current channel:** {current_text}\n"
+                f"**Completed sessions:** {len(completed_durations)}\n"
+                f"**Longest session:** {format_duration(longest_seconds)}\n"
+                f"**Average session:** {format_duration(average_seconds)}\n"
+                f"**Servers visited:** {server_count}\n"
+                f"**Managed accounts connected:** {connected_accounts} / {len(token_clients)}"
+            )
+
         @vc_group.command(
             name="settings",
             description="View or update slash response settings",
@@ -3598,6 +3900,7 @@ def vc_manager_farm_script():
                 "`/vc list`: List channel participants\n"
                 "`/vc history`: Show recent sessions\n"
                 "`/vc status`: Show connection details\n"
+                "`/vc stats`: Show tracked voice usage statistics\n"
                 "`/vc settings`: View or update response settings"
             )
 
@@ -3813,7 +4116,7 @@ def vc_manager_farm_script():
     managed_accounts_pager = tokens_table_card.create_ui_element(
         UI.ManagedAccountsPager,
         pager_id=managed_accounts_pager_id,
-        on_action=lambda tid: handle_token_leave(tid)
+        on_action=lambda payload: handle_token_action(payload)
     )
     ui_refs["managed_accounts_pager"] = managed_accounts_pager
 
@@ -3953,6 +4256,10 @@ def vc_manager_farm_script():
                 "status": "Not loaded",
                 "error": data["_load_error"],
                 "connected": False,
+                "muted": False,
+                "deafened": False,
+                "streaming": False,
+                "camera_on": False,
                 "removable": False
             })
         for item in data.get("tokens", []):
@@ -3979,6 +4286,10 @@ def vc_manager_farm_script():
                 "status": status_text,
                 "error": error_text,
                 "connected": in_vc,
+                "muted": bool(client.is_muted) if client else False,
+                "deafened": bool(client.is_deafened) if client else False,
+                "streaming": bool(client.is_streaming) if client else False,
+                "camera_on": bool(client.is_camera_on) if client else False,
                 "removable": True
             })
         evaluate_js(
@@ -4430,7 +4741,17 @@ def vc_manager_farm_script():
                 return
 
             results = await asyncio.gather(
-                *(client.join_vc(cur.guild.id, cur.id) for client in clients),
+                *(
+                    client.join_vc(
+                        cur.guild.id,
+                        cur.id,
+                        mute=is_muted,
+                        deaf=is_deafened,
+                        stream=is_streaming,
+                        video=is_camera_on,
+                    )
+                    for client in clients
+                ),
                 return_exceptions=True
             )
             connected = 0
@@ -4492,6 +4813,170 @@ def vc_manager_farm_script():
             tab.toast("Leave All stopped", "Nighty hit an internal error. Open the Nighty console for the technical details.", "ERROR")
         finally:
             disc_all_btn.loading = False
+
+    def handle_token_action(payload):
+        try:
+            action_data = json.loads(payload) if isinstance(payload, str) else payload
+        except (TypeError, ValueError, json.JSONDecodeError):
+            action_data = {"id": str(payload), "action": "account"}
+        if not isinstance(action_data, dict):
+            action_data = {"id": str(payload), "action": "account"}
+
+        row_id = str(action_data.get("id") or "")
+        action = str(action_data.get("action") or "account").lower()
+        if action == "account":
+            handle_token_leave(row_id)
+            return
+        if action in {"join", "leave", "connection"}:
+            handle_token_connection(row_id, action)
+            return
+        if action == "remove":
+            handle_token_remove(row_id)
+            return
+
+        control_map = {
+            "mute": ("is_muted", "mute", "Mute"),
+            "deaf": ("is_deafened", "deaf", "Deafen"),
+            "stream": ("is_streaming", "stream", "Stream"),
+            "video": ("is_camera_on", "video", "Camera"),
+        }
+        control = control_map.get(action)
+        if not control:
+            tab.toast("Unknown control", "Refresh the VC Manager page and try again.", "ERROR")
+            return
+
+        async def update_token_control():
+            client = token_clients.get(row_id)
+            if not client or not client.is_in_vc:
+                tab.toast(
+                    "Account is not connected",
+                    "Join this managed account to a voice channel first.",
+                    "ERROR",
+                )
+                update_token_table_rows()
+                return
+
+            attribute, argument, label = control
+            enabled = not bool(getattr(client, attribute, False))
+            result = await client.set_voice_controls(**{argument: enabled})
+            update_token_table_rows()
+            if result:
+                state_text = "enabled" if enabled else "disabled"
+                tab.toast(
+                    f"{label} {state_text}",
+                    f"Updated {client.name} without changing the other managed accounts.",
+                    "SUCCESS",
+                )
+            else:
+                tab.toast(
+                    f"Could not update {label.lower()}",
+                    client.last_error or "Discord rejected the voice control update.",
+                    "ERROR",
+                )
+
+        safe_create_task(update_token_control())
+
+    def handle_token_connection(row_id, requested_action="connection"):
+        row_id_str = str(row_id)
+        requested_action = str(requested_action or "connection").lower()
+
+        async def update_connection():
+            client = token_clients.get(row_id_str)
+            if not client:
+                tab.toast(
+                    "Account is not ready",
+                    "Refresh Managed Accounts. If it still does not load, remove it and add a fresh token.",
+                    "ERROR",
+                )
+                return
+
+            should_leave = requested_action == "leave" or (
+                requested_action == "connection" and client.is_in_vc
+            )
+            if should_leave:
+                if not client.is_in_vc:
+                    tab.toast("Account is not connected", f"{client.name} is already out of voice.", "ERROR")
+                    update_token_table_rows()
+                    return
+                if await client.leave_vc():
+                    tab.toast(
+                        "Account disconnected",
+                        f"{client.name} left the voice channel and remains saved.",
+                        "SUCCESS",
+                    )
+                else:
+                    tab.toast(
+                        "Disconnect failed",
+                        client.last_error or "Discord did not accept the leave request.",
+                        "ERROR",
+                    )
+                update_token_table_rows()
+                return
+
+            if client.is_in_vc:
+                tab.toast("Account is already connected", f"{client.name} is already in voice.", "ERROR")
+                update_token_table_rows()
+                return
+
+            current = get_current_voice_channel()
+            if not current:
+                tab.toast(
+                    "Main account is not connected",
+                    "Join a voice channel with VC Manager before joining this account.",
+                    "ERROR",
+                )
+                return
+
+            joined = await client.join_vc(
+                current.guild.id,
+                current.id,
+                mute=is_muted,
+                deaf=is_deafened,
+                stream=is_streaming,
+                video=is_camera_on,
+            )
+            update_token_table_rows()
+            if joined:
+                tab.toast(
+                    "Account connected",
+                    f"{client.name} joined #{current.name} with the current voice controls.",
+                    "SUCCESS",
+                )
+            else:
+                tab.toast(
+                    "Account could not join",
+                    client.last_error or "Discord did not confirm the voice join.",
+                    "ERROR",
+                )
+
+        safe_create_task(update_connection())
+
+    def handle_token_remove(row_id):
+        row_id_str = str(row_id)
+
+        async def remove_token():
+            data = load_tokens()
+            if data.get("_load_error"):
+                tab.toast("Token file is broken", data["_load_error"], "ERROR")
+                return
+            original_count = len(data.get("tokens", []))
+            data["tokens"] = [
+                item for item in data.get("tokens", [])
+                if not isinstance(item, dict) or str(item.get("id") or "") != row_id_str
+            ]
+            if len(data["tokens"]) == original_count:
+                tab.toast("Account not found", "Refresh Managed Accounts and try again.", "ERROR")
+                return
+            if not save_tokens(data):
+                tab.toast("Could not remove account", "Nighty could not update the token file.", "ERROR")
+                return
+            client = token_clients.pop(row_id_str, None)
+            if client:
+                await client.close()
+            update_token_table_rows()
+            tab.toast("Account removed", "The saved token was removed from VC Manager.", "SUCCESS")
+
+        safe_create_task(remove_token())
 
     def handle_token_leave(row_id):
         row_id_str = str(row_id)
