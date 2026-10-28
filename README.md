@@ -4,7 +4,7 @@
 
 Voice controls, session tracking, automation, slash commands, and multi-account connections for Nighty.
 
-[![Version](https://img.shields.io/badge/version-4.0-5865F2?style=flat-square)](./VCManagerV4.py)
+[![Version](https://img.shields.io/badge/version-4.0-5865F2?style=flat-square)](./VCManager.py)
 [![NightyScript](https://img.shields.io/badge/NightyScript-4.9-111827?style=flat-square)](https://nighty.one/)
 [![Python](https://img.shields.io/badge/Python-3.x-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE)
@@ -112,7 +112,7 @@ That distinction matters if you plan to read, modify, or contribute to the code:
 The main runtime path is:
 
 ```text
-Nighty loads VCManagerV4.py
+Nighty loads VCManager.py
   -> @nightyScript initializes the script
   -> CUI registers the VC Manager tab
   -> bot_app synchronizes /vc commands
@@ -123,7 +123,7 @@ Nighty loads VCManagerV4.py
 
 ## Installation
 
-1. Download [`VCManagerV4.py`](./VCManagerV4.py).
+1. Download [`VCManager.py`](./VCManager.py).
 2. Import the file through Nighty's script manager, or place it in the Nighty scripts directory.
 3. Enable the script.
 4. Open the **VC Manager** tab in Nighty.
