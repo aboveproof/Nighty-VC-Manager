@@ -3,7 +3,7 @@
 # High-speed Voice Channel Controller, Telemetry & Multi-Token Manager with CUI Integration
 
 @nightyScript(
-    name="VC Manager V4",
+    name="VC Manager v4.1.0",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
     usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
