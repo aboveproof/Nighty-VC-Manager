@@ -121,8 +121,6 @@ Nighty loads VCManagerV4.py
   -> JSON storage records settings and session history
 ```
 
-See [`AGENTS.md`](./AGENTS.md) for the NightyScript 4.9 API notes and repository rules used by this project. Those notes document supported script structure, storage, event listeners, message sending, asynchronous work, and prohibited imports.
-
 ## Installation
 
 1. Download [`VCManagerV4.py`](./VCManagerV4.py).
