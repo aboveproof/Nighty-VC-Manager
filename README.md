@@ -192,6 +192,13 @@ Do not commit or share these files. `vc_manager_tokens.json` contains usable Dis
 ## Troubleshooting
 
 <details>
+<summary><strong>The dashboard shows raw <code>__CUI__</code> text</strong></summary>
+
+Update to the latest script and reload the Nighty tab. The CUI recovery layer supports current Chromium, Firefox, and WebKit browsers, including their mobile versions, and retries after background-tab suspension or page-cache restoration. If raw text remains, check the browser console for a blocked Nighty callback bridge or a stale cached script.
+
+</details>
+
+<details>
 <summary><strong>The /vc command does not appear</strong></summary>
 
 Wait for the Nighty console to report a successful slash sync, then reload Discord with `Ctrl+R`. Restart Nighty if an old script generation still owns the command. Confirm that your Nighty build exposes `bot_app`.

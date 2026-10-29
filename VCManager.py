@@ -270,7 +270,7 @@ def vc_manager_farm_script():
         const PREFIX = '__CUI__';
         const cui = window.cUIData = window.cUIData || {};
         cui.templates = cui.templates || {};
-        cui.version = 'vc-manager-mobile-recovery-v3';
+        cui.version = 'vc-manager-browser-recovery-v4';
 
         const removeElement = function(element) {
             if (!element) return;
@@ -293,13 +293,26 @@ def vc_manager_farm_script():
             return result;
         };
 
+        cui.invokeCallback = async function(hookId, callbackName, value) {
+            let lastError = null;
+            for (let attempt = 0; attempt < 20; attempt += 1) {
+                const bridge = window.pywebview && window.pywebview.api;
+                if (bridge && typeof bridge.customCallback === 'function') {
+                    try {
+                        return await bridge.customCallback('_cui_cb', hookId, callbackName, value);
+                    } catch (error) {
+                        lastError = error;
+                    }
+                }
+                await new Promise(function(resolve) { setTimeout(resolve, 100); });
+            }
+            throw lastError || new Error('Nighty callback bridge is not ready');
+        };
+
         const callbackHandler = function(hookId, callbackName) {
             return `(async (element) => {
                 try {
-                    if (!window.pywebview || !window.pywebview.api || !window.pywebview.api.customCallback) {
-                        throw new Error('Nighty callback bridge is not ready');
-                    }
-                    await window.pywebview.api.customCallback('_cui_cb', '${hookId}', '${callbackName}', element ? element.value : null);
+                    await window.cUIData.invokeCallback('${hookId}', '${callbackName}', element ? element.value : null);
                 } catch (error) {
                     console.error('CUI callback failed:', error);
                 }
@@ -385,6 +398,12 @@ def vc_manager_farm_script():
             }
         };
 
+        const normalisePlaceholderText = function(value) {
+            return String(value || '')
+                .replace(/^[\u200B-\u200D\u2060\uFEFF]+/, '')
+                .trim();
+        };
+
         cui.findPlaceholders = function(root) {
             const firstRoot = root && root.nodeType ? root : document;
             const searchRoots = [];
@@ -420,7 +439,7 @@ def vc_manager_farm_script():
                 if (!ownerDocument.createTreeWalker || typeof NodeFilter === 'undefined') {
                     const candidates = searchRoot.querySelectorAll ? searchRoot.querySelectorAll('p, span, div') : [];
                     Array.prototype.forEach.call(candidates, function(element) {
-                        if ((element.textContent || '').trim().indexOf(PREFIX) !== 0) return;
+                        if (normalisePlaceholderText(element.textContent).indexOf(PREFIX) !== 0) return;
                         if (!seen || !seen.has(element)) {
                             if (seen) seen.add(element);
                             found.push(element);
@@ -434,7 +453,7 @@ def vc_manager_farm_script():
                     NodeFilter.SHOW_TEXT,
                     {
                         acceptNode: function(node) {
-                            return (node.nodeValue || '').trim().indexOf(PREFIX) === 0
+                            return normalisePlaceholderText(node.nodeValue).indexOf(PREFIX) === 0
                                 ? NodeFilter.FILTER_ACCEPT
                                 : NodeFilter.FILTER_REJECT;
                         }
@@ -442,13 +461,7 @@ def vc_manager_farm_script():
                 );
                 let textNode = walker.nextNode();
                 while (textNode) {
-                    let element = textNode.parentElement;
-                    while (element && element.parentElement) {
-                        const elementText = (element.textContent || '').trim();
-                        const parentText = (element.parentElement.textContent || '').trim();
-                        if (parentText !== elementText || parentText.indexOf(PREFIX) !== 0 || element.parentElement.children.length > 1) break;
-                        element = element.parentElement;
-                    }
+                    const element = textNode.parentElement;
                     if (element && (!seen || !seen.has(element))) {
                         if (seen) seen.add(element);
                         found.push(element);
@@ -456,11 +469,31 @@ def vc_manager_farm_script():
                     textNode = walker.nextNode();
                 }
             });
+
+            if (found.length === 0) {
+                searchRoots.forEach(function(searchRoot) {
+                    const candidates = searchRoot.querySelectorAll
+                        ? searchRoot.querySelectorAll('p, span, div, pre, code')
+                        : [];
+                    Array.prototype.forEach.call(candidates, function(element) {
+                        if (normalisePlaceholderText(element.textContent).indexOf(PREFIX) !== 0) return;
+                        const childMatch = Array.prototype.some.call(
+                            element.children || [],
+                            function(child) {
+                                return normalisePlaceholderText(child.textContent).indexOf(PREFIX) === 0;
+                            }
+                        );
+                        if (childMatch || (seen && seen.has(element))) return;
+                        if (seen) seen.add(element);
+                        found.push(element);
+                    });
+                });
+            }
             return found;
         };
 
         cui.injectPlaceholder = function(placeholder) {
-            const raw = (placeholder.textContent || '').trim();
+            const raw = normalisePlaceholderText(placeholder.textContent);
             if (raw.indexOf(PREFIX) !== 0) return false;
 
             let data;
@@ -512,12 +545,19 @@ def vc_manager_farm_script():
         cui.scheduleScan = function(root) {
             if (cui.scanScheduled) return;
             cui.scanScheduled = true;
+            let finished = false;
             const run = function() {
+                if (finished) return;
+                finished = true;
                 cui.scanScheduled = false;
                 cui.scanAndInject(root || document);
             };
-            if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
-            else setTimeout(run, 0);
+            if (typeof window.requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') {
+                window.requestAnimationFrame(run);
+                setTimeout(run, 160);
+            } else {
+                setTimeout(run, 0);
+            }
         };
 
         cui.updateTemplates = function(newTemplates) {
@@ -542,14 +582,30 @@ def vc_manager_farm_script():
             cui.recoveryTimer = setInterval(function() { cui.scanAndInject(document); }, 1000);
 
             if (cui.recoveryHandler) {
+                window.removeEventListener('load', cui.recoveryHandler);
                 window.removeEventListener('pageshow', cui.recoveryHandler);
                 window.removeEventListener('focus', cui.recoveryHandler);
+                window.removeEventListener('online', cui.recoveryHandler);
+                window.removeEventListener('popstate', cui.recoveryHandler);
+                window.removeEventListener('hashchange', cui.recoveryHandler);
+                window.removeEventListener('orientationchange', cui.recoveryHandler);
+                window.removeEventListener('resume', cui.recoveryHandler);
                 document.removeEventListener('visibilitychange', cui.recoveryHandler);
+                document.removeEventListener('webkitvisibilitychange', cui.recoveryHandler);
+                document.removeEventListener('readystatechange', cui.recoveryHandler);
             }
             cui.recoveryHandler = function() { cui.scheduleScan(document); };
+            window.addEventListener('load', cui.recoveryHandler);
             window.addEventListener('pageshow', cui.recoveryHandler);
             window.addEventListener('focus', cui.recoveryHandler);
+            window.addEventListener('online', cui.recoveryHandler);
+            window.addEventListener('popstate', cui.recoveryHandler);
+            window.addEventListener('hashchange', cui.recoveryHandler);
+            window.addEventListener('orientationchange', cui.recoveryHandler);
+            window.addEventListener('resume', cui.recoveryHandler);
             document.addEventListener('visibilitychange', cui.recoveryHandler);
+            document.addEventListener('webkitvisibilitychange', cui.recoveryHandler);
+            document.addEventListener('readystatechange', cui.recoveryHandler);
             cui.scheduleScan(document);
         };
 
@@ -573,7 +629,12 @@ def vc_manager_farm_script():
 
     def build_cui_bootstrap_js(include_helpers=False):
         """Build one ordered payload so slower browsers cannot miss CUI templates."""
-        scripts = [JS_CUI]
+        scripts = [
+            "(function(){if(!window.cUIData||"
+            "window.cUIData.version!=='vc-manager-browser-recovery-v4'){"
+            + JS_CUI
+            + "}else{window.cUIData.installRecovery();}})();"
+        ]
         templates = get_cui_templates()
         if templates:
             scripts.append(
@@ -929,6 +990,14 @@ def vc_manager_farm_script():
         def pg_js():
             return """
                 (function() {
+                    if (
+                        window.CUI_Pager &&
+                        window.CUI_Pager.version === 'vc-manager-pager-v2' &&
+                        window.CUI_Pager.observer
+                    ) {
+                        window.CUI_Pager.initPagers();
+                        return;
+                    }
                     if (window.CUI_Pager && window.CUI_Pager.observer) {
                         window.CUI_Pager.observer.disconnect();
                     }
@@ -957,6 +1026,7 @@ def vc_manager_farm_script():
                     document.head.appendChild(style);
 
                     window.CUI_Pager = {
+                        version: 'vc-manager-pager-v2',
                         initPagers: function() {
                             const allMarkers = document.querySelectorAll('.cui-page-marker');
                             const pagersToInit = new Map();
@@ -1160,6 +1230,18 @@ def vc_manager_farm_script():
 
     VC_UI_JS = """
     (function() {
+        const uiVersion = 'vc-manager-ui-v4';
+        if (
+            window.VCManagerUIVersion === uiVersion &&
+            (window.VCManagerLayoutObserver || window.VCManagerLayoutTimer)
+        ) {
+            if (typeof window.VCManagerRefreshLayout === 'function') {
+                window.VCManagerRefreshLayout();
+            }
+            return;
+        }
+        window.VCManagerUIVersion = uiVersion;
+
         const clearElement = function(element) {
             if (!element) return;
             if (typeof element.replaceChildren === 'function') element.replaceChildren();
@@ -1343,10 +1425,14 @@ def vc_manager_farm_script():
             const root = document.getElementById(pagerId);
             const proxy = root ? root.querySelector('[data-managed-action-proxy]') : null;
             if (!proxy) return;
-            proxy.value = JSON.stringify({
+            const payload = JSON.stringify({
                 id: String(rowId || ''),
                 action: String(actionName || 'account')
             });
+            // Keep both forms in sync. Some Nighty browser builds read the
+            // current property while others read the serialized attribute.
+            proxy.value = payload;
+            proxy.setAttribute('value', payload);
             proxy.click();
         };
         managedPager.closeMenus = function() {
@@ -5559,6 +5645,50 @@ def vc_manager_farm_script():
                 return saved_item
         return None
 
+    def resolve_token_join_destination(token_id):
+        """Choose a destination for one managed account without sharing credentials."""
+        token_id = str(token_id or "")
+        token_data = load_tokens().get("tokens", [])
+        saved_item = next(
+            (
+                item for item in token_data
+                if isinstance(item, dict) and str(item.get("id") or "") == token_id
+            ),
+            {},
+        )
+        guild_id = str(saved_item.get("preferred_guild_id") or "")
+        channel_id = str(saved_item.get("preferred_channel_id") or "")
+        if guild_id and channel_id:
+            return guild_id, channel_id, "this account's saved destination"
+
+        current = get_current_voice_channel()
+        if current and getattr(current, "guild", None):
+            return str(current.guild.id), str(current.id), "the primary VC Manager session"
+
+        for other_id, other_client in token_clients.items():
+            if (
+                str(other_id) != token_id
+                and other_client.is_in_vc
+                and other_client.current_guild_id
+                and other_client.current_channel_id
+            ):
+                return (
+                    str(other_client.current_guild_id),
+                    str(other_client.current_channel_id),
+                    f"{other_client.name}'s active channel",
+                )
+
+        for item in token_data:
+            if not isinstance(item, dict) or str(item.get("id") or "") == token_id:
+                continue
+            shared_guild_id = str(item.get("preferred_guild_id") or "")
+            shared_channel_id = str(item.get("preferred_channel_id") or "")
+            if shared_guild_id and shared_channel_id:
+                shared_name = str(item.get("label") or item.get("name") or "another account")
+                return shared_guild_id, shared_channel_id, f"{shared_name}'s saved destination"
+
+        return "", "", ""
+
     async def refresh_destination_servers(force=False):
         nonlocal selected_token_guild_id, selected_token_channel_id
         client = token_clients.get(str(selected_token_id or ""))
@@ -6113,7 +6243,6 @@ def vc_manager_farm_script():
     async def handle_conn_all_tokens():
         conn_all_btn.loading = True
         try:
-            cur = get_current_voice_channel()
             clients = list(token_clients.items())
             if not clients:
                 tab.toast("No managed accounts", "Add at least one account before pressing Join All.", "ERROR")
@@ -6123,16 +6252,19 @@ def vc_manager_farm_script():
             join_clients = []
             failures = []
             for token_id, client in clients:
-                saved_item = get_saved_token_item(token_id) or {}
-                guild_id = str(saved_item.get("preferred_guild_id") or "")
-                channel_id = str(saved_item.get("preferred_channel_id") or "")
+                guild_id, channel_id, destination_source = resolve_token_join_destination(token_id)
                 if not guild_id or not channel_id:
-                    if cur:
-                        guild_id = str(cur.guild.id)
-                        channel_id = str(cur.id)
-                    else:
-                        failures.append((client.name, "Choose this account's server and voice channel in Account Destination."))
-                        continue
+                    failures.append((
+                        client.name,
+                        "Choose this account's server and voice channel in Account Destination. "
+                        "No active or saved managed destination is available.",
+                    ))
+                    continue
+                print(
+                    f"[VC Manager] Join All selected guild {guild_id}, channel {channel_id} "
+                    f"for {client.name} (record {str(token_id)[:8]}) using {destination_source}.",
+                    type_="INFO",
+                )
                 join_clients.append(client)
                 join_jobs.append(client.join_vc(
                     guild_id,
@@ -6309,6 +6441,14 @@ def vc_manager_farm_script():
 
         row_id = str(action_data.get("id") or "")
         action = str(action_data.get("action") or "account").lower()
+        if not row_id:
+            print("[VC Manager] Managed Accounts sent an action without an account ID.", type_="ERROR")
+            tab.toast("Account action failed", "Refresh the VC Manager page and try again.", "ERROR")
+            return
+        print(
+            f"[VC Manager] Managed account action '{action}' received for record {row_id[:8]}.",
+            type_="INFO",
+        )
         if action == "account":
             handle_token_connection(row_id, "connection")
             return
@@ -6370,86 +6510,112 @@ def vc_manager_farm_script():
 
         async def update_connection():
             client = token_clients.get(row_id_str)
-            if not client:
-                tab.toast(
-                    "Account is not ready",
-                    "Refresh Managed Accounts. If it still does not load, remove it and add a fresh token.",
-                    "ERROR",
-                )
-                return
-
-            should_leave = requested_action == "leave" or (
-                requested_action == "connection" and client.is_in_vc
-            )
-            if should_leave:
-                if not client.is_in_vc:
-                    tab.toast("Account is not connected", f"{client.name} is already out of voice.", "ERROR")
-                    update_token_table_rows()
-                    return
-                if await client.leave_vc():
-                    tab.toast(
-                        "Account disconnected",
-                        f"{client.name} left the voice channel and remains saved.",
-                        "SUCCESS",
+            try:
+                if not client:
+                    print(
+                        f"[VC Manager] Managed account action used an unknown record ID: {row_id_str}",
+                        type_="ERROR",
                     )
-                else:
                     tab.toast(
-                        "Disconnect failed",
-                        client.last_error or "Discord did not accept the leave request.",
+                        "Account is not ready",
+                        "Refresh Managed Accounts. If it still does not load, remove it and add a fresh token.",
                         "ERROR",
                     )
-                update_token_table_rows()
-                return
+                    return
 
-            if client.is_in_vc:
-                tab.toast("Account is already connected", f"{client.name} is already in voice.", "ERROR")
-                update_token_table_rows()
-                return
-
-            saved_item = get_saved_token_item(row_id_str) or {}
-            target_guild_id = str(saved_item.get("preferred_guild_id") or "")
-            target_channel_id = str(saved_item.get("preferred_channel_id") or "")
-            current = get_current_voice_channel()
-            if (not target_guild_id or not target_channel_id) and current:
-                target_guild_id = str(current.guild.id)
-                target_channel_id = str(current.id)
-            if not target_guild_id or not target_channel_id:
-                tab.toast(
-                    "Destination required",
-                    "Choose this account's server and voice channel in Account Destination.",
-                    "ERROR",
+                should_leave = requested_action == "leave" or (
+                    requested_action == "connection" and client.is_in_vc
                 )
-                return
+                if should_leave:
+                    if not client.is_in_vc:
+                        tab.toast("Account is not connected", f"{client.name} is already out of voice.", "ERROR")
+                        return
+                    if await client.leave_vc():
+                        tab.toast(
+                            "Account disconnected",
+                            f"{client.name} left the voice channel and remains saved.",
+                            "SUCCESS",
+                        )
+                    else:
+                        tab.toast(
+                            "Disconnect failed",
+                            client.last_error or "Discord did not accept the leave request.",
+                            "ERROR",
+                        )
+                    return
 
-            joined = await client.join_vc(
-                target_guild_id,
-                target_channel_id,
-                mute=is_muted,
-                deaf=is_deafened,
-                stream=is_streaming,
-                video=is_camera_on,
-            )
-            update_token_table_rows()
-            if joined:
-                channel_name = target_channel_id
-                for channel_item in client.channel_cache.get(target_guild_id, []):
-                    if str(channel_item.get("id")) == target_channel_id:
-                        channel_name = channel_item.get("name") or target_channel_id
-                        break
-                if client.last_error:
-                    tab.toast("Account connected, destination not saved", client.last_error, "ERROR")
-                else:
-                    tab.toast(
-                        "Account connected",
-                        f"{client.name} joined #{channel_name} with the current voice controls.",
-                        "SUCCESS",
+                if client.is_in_vc:
+                    tab.toast("Account is already connected", f"{client.name} is already in voice.", "ERROR")
+                    return
+
+                target_guild_id, target_channel_id, destination_source = resolve_token_join_destination(row_id_str)
+                if not target_guild_id or not target_channel_id:
+                    client._set_status(
+                        "Destination required",
+                        "Choose this account's server and voice channel in Account Destination. "
+                        "No active or saved managed destination is available.",
                     )
-            else:
+                    tab.toast("Destination required", client.last_error, "ERROR")
+                    return
+
+                print(
+                    f"[VC Manager] Joining {client.name} (record {row_id_str[:8]}) "
+                    f"to guild {target_guild_id}, channel {target_channel_id} using {destination_source}.",
+                    type_="INFO",
+                )
+                joined = await client.join_vc(
+                    target_guild_id,
+                    target_channel_id,
+                    mute=is_muted,
+                    deaf=is_deafened,
+                    stream=is_streaming,
+                    video=is_camera_on,
+                )
+                if joined:
+                    channel_name = target_channel_id
+                    for channel_item in client.channel_cache.get(target_guild_id, []):
+                        if str(channel_item.get("id")) == target_channel_id:
+                            channel_name = channel_item.get("name") or target_channel_id
+                            break
+                    print(
+                        f"[VC Manager] {client.name} joined guild {target_guild_id}, channel {target_channel_id}.",
+                        type_="INFO",
+                    )
+                    if client.last_error:
+                        tab.toast("Account connected, destination not saved", client.last_error, "ERROR")
+                    else:
+                        tab.toast(
+                            "Account connected",
+                            f"{client.name} joined #{channel_name} with the current voice controls.",
+                            "SUCCESS",
+                        )
+                else:
+                    error_text = client.last_error or "Discord did not confirm the voice join."
+                    print(
+                        f"[VC Manager] Join failed for {client.name} (record {row_id_str[:8]}): {error_text}",
+                        type_="ERROR",
+                    )
+                    tab.toast("Account could not join", error_text, "ERROR")
+            except Exception as error:
+                account_name = client.name if client else f"record {row_id_str[:8]}"
+                print(
+                    f"[VC Manager] Join action crashed for {account_name}: "
+                    f"{type(error).__name__}: {error}",
+                    type_="ERROR",
+                )
+                if client:
+                    client._set_status(
+                        "Join failed",
+                        f"VC Manager hit {type(error).__name__} while joining this account. "
+                        "Check the Nighty console for the technical error.",
+                    )
                 tab.toast(
                     "Account could not join",
-                    client.last_error or "Discord did not confirm the voice join.",
+                    f"VC Manager hit {type(error).__name__}. Check the Nighty console for the full error.",
                     "ERROR",
                 )
+            finally:
+                update_token_table_rows()
 
         safe_create_task(update_connection())
 
@@ -6608,8 +6774,8 @@ def vc_manager_farm_script():
 
     async def startup_sync():
         await asyncio.sleep(0.02)
-    # Paint the primary connection and participants before secondary gateways
-    # finish logging in.
+        # Paint the primary connection and participants before secondary gateways
+        # finish logging in.
         await sync_voice_state(update_ui=True)
         await refresh_server_list(preserve_selection=True)
         if token_clients:
@@ -6638,8 +6804,8 @@ def vc_manager_farm_script():
                 if tick_count % 5 == 0:
                     await sync_voice_state(update_ui=True)
                 if tick_count % 10 == 0:
-    # Some Nighty web builds redraw the tab after Socket.IO connects. Reinstall
-    # CUI on each pass so a refresh does not show serialized __CUI__ text.
+                    # Some Nighty web builds redraw the tab after Socket.IO connects.
+                    # Reinstall CUI so refreshes do not leave serialized placeholders.
                     reeval()
             except asyncio.CancelledError:
                 break
@@ -6666,7 +6832,7 @@ def vc_manager_farm_script():
             previous_restore.cancel()
 
         async def restore_after_render():
-    # Nighty paints the private tab in stages. Run CUI after each paint.
+            # Nighty paints the private tab in stages. Run CUI after each paint.
             for delay in (0.10, 0.35, 0.75, 1.50, 3.00):
                 await asyncio.sleep(delay)
                 reeval()
