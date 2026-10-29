@@ -4,8 +4,8 @@
 
 Voice controls, session tracking, automation, slash commands, and multi-account connections for Nighty.
 
-[![Version](https://img.shields.io/badge/version-4.1.0-5865F2?style=flat-square)](./VCManager.py)
-[![NightyScript](https://img.shields.io/badge/NightyScript-4.9-111827?style=flat-square)](https://nighty.one/)
+[![Version](https://img.shields.io/badge/version-4.3.0-5865F2?style=flat-square)](./VCManager.py)
+[![NightyScript](https://img.shields.io/badge/NightyScript-5.0-111827?style=flat-square)](https://github.com/aboveproof/nighty-docs)
 [![Python](https://img.shields.io/badge/Python-3.x-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE)
 
@@ -16,16 +16,6 @@ Voice controls, session tracking, automation, slash commands, and multi-account 
 Nighty VC Manager adds a dedicated voice dashboard to Nighty and a `/vc` slash-command group to Discord. It tracks only the voice connection opened through the script, so your normal Discord voice session does not take over the manager.
 
 The dashboard handles the primary Nighty account and optional secondary accounts. It also records session time, shows channel participants, edits voice-channel status when your account has permission, and provides reconnect and disconnect automation.
-
----
-
-| ![Demo of VcManager](assets/dashboard1.png)                                                          |
-| :--------------------------------------------------------------------------------------------------: |
-
-| ![Demo of VcManager](assets/dashboard2.png)                                                          |
-| :--------------------------------------------------------------------------------------------------: |
-
----
 
 > [!WARNING]
 > Nighty is a Discord selfbot. Selfbots and user-account automation can violate Discord's Terms of Service and may put accounts at risk. This project is not affiliated with Discord or Nighty. You are responsible for how you use it.
@@ -71,13 +61,19 @@ The stream and camera controls update Discord voice-state flags. Actual media be
 ### Multi-account connections
 
 - Add secondary Discord accounts by token and label
+- Give each account its own server and voice-channel destination
+- See the selected account's avatar beside its destination picker
 - Join or leave all managed accounts together
+- Set one bulk mute, deafen, stream, and camera state before joining all accounts
 - Join or leave one managed account directly from its table row
+- Restore saved voice destinations after recoverable gateway or network drops
 - Mirror the primary mute, deafen, stream, and camera controls to connected accounts
 - Override mute, deafen, stream, or camera for one account from its table row
 - View each account's channel and connection state
+- View session history and tracked voice time for each managed account
 - Paginated managed-account list
 - Remove individual accounts from the manager
+- Check the public repository for newer script versions and show an in-app update prompt
 
 Secondary accounts use direct Discord Gateway connections. Tokens stay in a local JSON file and are not encrypted.
 
@@ -107,7 +103,7 @@ pip install aiohttp
 
 ## Language and architecture
 
-VC Manager is written in **Python for NightyScript 4.9**. NightyScript is Nighty's embedded scripting environment, not a standalone Discord bot framework. Nighty owns the logged-in Discord client and injects its scripting API into the file when the script loads.
+VC Manager is written in **Python for NightyScript 5.0**. NightyScript is Nighty's embedded scripting environment, not a standalone Discord bot framework. Nighty owns the logged-in Discord client and injects its scripting API into the file when the script loads.
 
 That distinction matters if you plan to read, modify, or contribute to the code:
 

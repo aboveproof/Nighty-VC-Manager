@@ -3,7 +3,7 @@
 # Voice controls, session data, and multi-token account management for Nighty
 
 @nightyScript(
-    name="VC Manager v4.1.0",
+    name="VC Manager v4.3.0",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
     usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
@@ -45,6 +45,12 @@ def vc_manager_farm_script():
       secondary managed account when two simultaneous calls are in one server.
     - Secondary Discord user tokens are stored locally in the Nighty scripts
       JSON directory. Keep that directory private.
+    - Each managed account can save its own server and channel. Recoverable
+      gateway drops restore that destination until Leave is pressed.
+    - Managed-account session logs are stored per account. Bulk controls can
+      join saved destinations and apply one voice state to all connected accounts.
+    - The script checks the public project repository for a newer version and
+      shows an in-app notice when an update is available.
     - The CUI compatibility layer is initialized inside this function as
       required by the upstream CUI project.
     """
@@ -58,6 +64,8 @@ def vc_manager_farm_script():
     import json
     import math
     import os
+    import random
+    import re
     import shutil
     import threading
     import time
@@ -70,15 +78,39 @@ def vc_manager_farm_script():
 
     import aiohttp
 
+    SCRIPT_VERSION = "4.3.0"
+    PROJECT_URL = "https://github.com/aboveproof/Nighty-VC-Manager"
+    VERSION_SOURCE_URL = (
+        "https://raw.githubusercontent.com/aboveproof/Nighty-VC-Manager/main/VCManager.py"
+    )
+
     # Nighty replaces scripts in the same Python process. Cancel tasks from the
     # previous VC Manager load so old timers and gateway loops stop updating it.
     runtime_key = "_vc_manager_runtime"
     previous_runtime = getattr(bot, runtime_key, None)
     previous_token_clients = []
+    previous_token_states = {}
     previous_managed_target = None
     previous_connection_start_time = None
     if isinstance(previous_runtime, dict):
-        previous_token_clients = list(previous_runtime.get("token_clients", {}).values())
+        previous_clients_by_id = previous_runtime.get("token_clients", {})
+        if isinstance(previous_clients_by_id, dict):
+            previous_token_clients = list(previous_clients_by_id.values())
+            for previous_id, previous_client in previous_clients_by_id.items():
+                previous_channel_id = getattr(previous_client, "desired_channel_id", None) or getattr(previous_client, "current_channel_id", None)
+                previous_guild_id = getattr(previous_client, "desired_guild_id", None) or getattr(previous_client, "current_guild_id", None)
+                if previous_channel_id and previous_guild_id:
+                    previous_token_states[str(previous_id)] = {
+                        "guild_id": str(previous_guild_id),
+                        "channel_id": str(previous_channel_id),
+                        "muted": bool(getattr(previous_client, "is_muted", False)),
+                        "deafened": bool(getattr(previous_client, "is_deafened", False)),
+                        "streaming": bool(getattr(previous_client, "is_streaming", False)),
+                        "camera_on": bool(getattr(previous_client, "is_camera_on", False)),
+                        "session_started_at": getattr(previous_client, "voice_session_started_at", None),
+                        "session_guild_id": getattr(previous_client, "voice_session_guild_id", None),
+                        "session_channel_id": getattr(previous_client, "voice_session_channel_id", None),
+                    }
         saved_target = previous_runtime.get("managed_target")
         if isinstance(saved_target, dict):
             previous_managed_target = dict(saved_target)
@@ -854,11 +886,13 @@ def vc_manager_farm_script():
                     </div>
                     <button type="button" data-managed-action-proxy onclick="${on_action}" style="display: none;"></button>
                     <div style="display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; width: 100%; padding: 12px; background: rgba(255,255,255,0.035); border-radius: 10px;">
-                        <div style="display: grid; grid-template-columns: minmax(150px,1.25fr) minmax(110px,.8fr) minmax(90px,.55fr) minmax(300px,1.35fr) 210px; gap: 12px; padding: 10px 12px; background: rgba(255,255,255,0.07); border-radius: 8px; font-weight: 700;">
+                        <div class="vc-managed-header" style="display:grid;grid-template-columns:minmax(140px,1.15fr) minmax(90px,.65fr) minmax(90px,.65fr) minmax(82px,.5fr) minmax(250px,1.25fr) 90px 196px;gap:10px;padding:10px 12px;background:rgba(255,255,255,0.07);border-radius:8px;font-weight:700;">
                             <span>Account</span>
+                            <span>Server</span>
                             <span>Channel</span>
                             <span>Status</span>
                             <span>Voice Controls</span>
+                            <span>Sessions</span>
                             <span>Action</span>
                         </div>
                         <div data-managed-rows style="display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;"></div>
@@ -1142,6 +1176,58 @@ def vc_manager_farm_script():
         const staleVisualizer = document.getElementById('vc_audio_viz_root');
         if (staleVisualizer) staleVisualizer.remove();
 
+        let responsiveStyle = document.getElementById('vc-manager-responsive-style');
+        if (!responsiveStyle) {
+            responsiveStyle = document.createElement('style');
+            responsiveStyle.id = 'vc-manager-responsive-style';
+            document.head.appendChild(responsiveStyle);
+        }
+        responsiveStyle.textContent = `
+            .vc-managed-row, .vc-participant-pager [data-participant-rows] > div {
+                transition: background-color 160ms ease, border-color 160ms ease;
+            }
+            .vc-managed-row:hover { background: rgba(255,255,255,.025); }
+            .vc-managed-row button:focus-visible,
+            .vc-managed-accounts-pager button:focus-visible,
+            .vc-participant-pager button:focus-visible {
+                outline: 2px solid rgba(111,145,171,.92);
+                outline-offset: 2px;
+            }
+            @media (max-width: 1080px) {
+                .vc-managed-header { display: none !important; }
+                .vc-managed-row {
+                    display: grid !important;
+                    grid-template-columns: minmax(0,1fr) minmax(0,1fr) !important;
+                    gap: 10px 14px !important;
+                    min-height: 0 !important;
+                    margin-bottom: 10px;
+                    padding: 14px !important;
+                    border: 1px solid rgba(255,255,255,.08);
+                    border-radius: 10px;
+                }
+                .vc-managed-controls, .vc-managed-sessions, .vc-managed-actions {
+                    grid-column: 1 / -1;
+                    flex-wrap: wrap !important;
+                }
+                .vc-managed-sessions button { width: auto !important; min-width: 96px; }
+            }
+            @media (max-width: 640px) {
+                .vc-managed-accounts-pager, .vc-participant-pager { min-width: 0 !important; }
+                .vc-managed-row { grid-template-columns: minmax(0,1fr) !important; }
+                .vc-managed-row > * { grid-column: 1 !important; }
+                .vc-managed-controls { gap: 5px !important; }
+                .vc-managed-controls button { flex: 1 1 calc(50% - 5px); }
+                .vc-managed-sessions button { width: 100% !important; }
+                .vc-managed-actions button { min-width: 0 !important; }
+                .vc-participant-pager [data-participant-controls],
+                .vc-managed-accounts-pager [data-managed-controls] {
+                    top: 12px !important;
+                    right: 12px !important;
+                    padding: 3px 6px !important;
+                }
+            }
+        `;
+
         const participantPager = window.VCParticipantPager || { states: {} };
         participantPager.states = participantPager.states || {};
         participantPager.pageSize = 5;
@@ -1200,6 +1286,7 @@ def vc_manager_farm_script():
 
             pageRows.forEach(item => {
                 const row = document.createElement('div');
+                row.className = 'vc-managed-row';
                 row.style.cssText = 'display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:12px;align-items:center;min-height:86px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);box-sizing:border-box;';
 
                 const identity = document.createElement('div');
@@ -1308,7 +1395,8 @@ def vc_manager_farm_script():
 
             pageRows.forEach(item => {
                 const row = document.createElement('div');
-                row.style.cssText = 'display:grid;grid-template-columns:minmax(150px,1.25fr) minmax(110px,.8fr) minmax(90px,.55fr) minmax(300px,1.35fr) 210px;gap:12px;align-items:center;min-height:76px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);box-sizing:border-box;';
+                row.className = 'vc-managed-row';
+                row.style.cssText = 'display:grid;grid-template-columns:minmax(140px,1.15fr) minmax(90px,.65fr) minmax(90px,.65fr) minmax(82px,.5fr) minmax(250px,1.25fr) 90px 196px;gap:10px;align-items:center;min-height:76px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);box-sizing:border-box;';
 
                 const identity = document.createElement('div');
                 identity.style.cssText = 'display:flex;align-items:center;gap:10px;min-width:0;';
@@ -1336,8 +1424,13 @@ def vc_manager_farm_script():
                 identityText.append(name, id);
                 identity.appendChild(identityText);
 
+                const server = document.createElement('span');
+                server.textContent = item.server || '-';
+                server.title = item.server || '-';
+                server.style.cssText = 'font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
                 const channel = document.createElement('span');
                 channel.textContent = item.channel || '-';
+                channel.title = item.channel || '-';
                 channel.style.cssText = 'font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
                 const status = document.createElement('div');
                 status.style.cssText = 'display:flex;flex-direction:column;min-width:0;';
@@ -1354,6 +1447,7 @@ def vc_manager_farm_script():
                 }
 
                 const controls = document.createElement('div');
+                controls.className = 'vc-managed-controls';
                 controls.style.cssText = 'display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:nowrap;';
                 const controlItems = [
                     ['mute', 'Mute', Boolean(item.muted)],
@@ -1379,7 +1473,18 @@ def vc_manager_farm_script():
                     controls.appendChild(button);
                 });
 
+                const sessions = document.createElement('div');
+                sessions.className = 'vc-managed-sessions';
+                const sessionsButton = document.createElement('button');
+                sessionsButton.type = 'button';
+                sessionsButton.textContent = 'View Logs';
+                sessionsButton.title = `View voice sessions for ${item.name || 'this account'}`;
+                sessionsButton.style.cssText = 'width:100%;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);border-radius:8px;padding:7px 9px;font-size:11px;font-weight:600;white-space:nowrap;cursor:pointer;';
+                sessionsButton.onclick = () => this.action(pagerId, item.id, 'logs');
+                sessions.appendChild(sessionsButton);
+
                 const action = document.createElement('div');
+                action.className = 'vc-managed-actions';
                 action.style.cssText = 'display:flex;align-items:center;gap:6px;min-width:0;position:relative;';
 
                 const connectionButton = document.createElement('button');
@@ -1432,7 +1537,7 @@ def vc_manager_farm_script():
                 };
 
                 action.append(connectionButton, leaveButton, menuButton, tokenMenu);
-                row.append(identity, channel, status, controls, action);
+                row.append(identity, server, channel, status, controls, sessions, action);
                 body.appendChild(row);
             });
         };
@@ -1445,16 +1550,81 @@ def vc_manager_farm_script():
             const card = title ? (title.closest('.card') || title.parentElement) : null;
             if (!card) return;
             card.style.position = 'relative';
+            card.style.width = '100%';
+            card.style.maxWidth = 'none';
+            card.style.boxSizing = 'border-box';
+            const pagerRoot = card.querySelector('.vc-managed-accounts-pager');
+            if (pagerRoot) {
+                pagerRoot.style.width = '100%';
+                pagerRoot.style.maxWidth = '100%';
+                pagerRoot.style.minWidth = '0';
+            }
             if (window.innerWidth < 760) {
                 card.style.height = '';
                 card.style.minHeight = '';
                 card.style.maxHeight = '';
                 return;
             }
-            card.style.height = '340px';
-            card.style.minHeight = '340px';
-            card.style.maxHeight = '340px';
+            card.style.height = '360px';
+            card.style.minHeight = '360px';
+            card.style.maxHeight = '360px';
             card.style.overflow = 'hidden';
+        };
+
+        window.sizeVCAccountSetupCards = function() {
+            const findCard = exactTitle => {
+                const title = Array.from(document.querySelectorAll('*')).find(element =>
+                    element.childElementCount === 0 && element.textContent.trim() === exactTitle
+                );
+                return title ? (title.closest('.card') || title.parentElement) : null;
+            };
+            const tokenCard = findCard('Multi-Token Accounts');
+            const destinationCard = findCard('Account Destination');
+            if (!tokenCard || !destinationCard || tokenCard.parentElement !== destinationCard.parentElement) return;
+            const row = tokenCard.parentElement;
+            row.style.display = 'grid';
+            row.style.alignItems = 'stretch';
+            row.style.gridTemplateColumns = window.innerWidth < 860
+                ? 'minmax(0, 1fr)'
+                : 'minmax(0, 1fr) minmax(0, 1fr)';
+            row.style.gap = window.innerWidth < 640 ? '12px' : '16px';
+            tokenCard.style.minWidth = '0';
+            destinationCard.style.minWidth = '0';
+            [tokenCard, destinationCard].forEach(card => {
+                card.style.width = '100%';
+                card.style.maxWidth = 'none';
+                card.querySelectorAll('input, [role="combobox"]').forEach(control => {
+                    control.style.maxWidth = '100%';
+                    control.style.minWidth = '0';
+                });
+                if (window.innerWidth < 640) {
+                    card.querySelectorAll('button').forEach(button => {
+                        button.style.minWidth = '0';
+                        button.style.maxWidth = '100%';
+                    });
+                    card.querySelectorAll('button').forEach(button => {
+                        const group = button.parentElement;
+                        const groupButtons = group
+                            ? Array.from(group.children).filter(child => child.tagName === 'BUTTON')
+                            : [];
+                        if (group && groupButtons.length > 1) {
+                            group.style.display = 'flex';
+                            group.style.flexWrap = 'wrap';
+                            group.style.gap = '8px';
+                            groupButtons.forEach(child => { child.style.flex = '1 1 120px'; });
+                        }
+                    });
+                } else {
+                    card.querySelectorAll('button').forEach(button => {
+                        button.style.flex = '';
+                        const group = button.parentElement;
+                        if (group) {
+                            group.style.flexWrap = '';
+                            group.style.gap = '';
+                        }
+                    });
+                }
+            });
         };
 
         window.sizeVCParticipantCard = function() {
@@ -1541,6 +1711,7 @@ def vc_manager_farm_script():
             window.positionVCManagerTablePagers();
             window.sizeVCParticipantCard();
             window.sizeVCManagedAccountsCard();
+            window.sizeVCAccountSetupCards();
             document.querySelectorAll('.vc-managed-accounts-pager').forEach(root => {
                 if (root.dataset.managedPagerReady !== 'true') {
                     window.VCManagedAccountsPager.render(root.id);
@@ -1564,6 +1735,7 @@ def vc_manager_farm_script():
             window.positionVCManagerTablePagers();
             window.sizeVCParticipantCard();
             window.sizeVCManagedAccountsCard();
+            window.sizeVCAccountSetupCards();
             Object.keys(window.VCParticipantPager.states).forEach(pagerId =>
                 window.VCParticipantPager.render(pagerId)
             );
@@ -1576,6 +1748,7 @@ def vc_manager_farm_script():
         window.VCManagerResizeHandler = () => {
             window.sizeVCParticipantCard();
             window.sizeVCManagedAccountsCard();
+            window.sizeVCAccountSetupCards();
         };
         window.addEventListener('resize', window.VCManagerResizeHandler);
     })();
@@ -1678,9 +1851,10 @@ def vc_manager_farm_script():
 
     @cui_new(type="callable", name="SessionHistoryModal")
     class SessionHistoryModal:
-        _init_params = ["self", "sessions_json", "total_vc_time", "onClear", "onClose"]
+        _init_params = ["self", "title", "sessions_json", "total_vc_time", "onClear", "onClose"]
 
-        def __init__(self, sessions_json="[]", total_vc_time="0s", onClear=None, onClose=None):
+        def __init__(self, title="Voice Session History", sessions_json="[]", total_vc_time="0s", onClear=None, onClose=None):
+            self.title = title
             self.sessions_json = sessions_json
             self.total_vc_time = total_vc_time
             self.onClear = onClear
@@ -1699,7 +1873,7 @@ def vc_manager_farm_script():
                 font-family: inherit;
             ">
                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 12px;">
-                    <span style="font-size: 16px; font-weight: 700;">Voice Session History</span>
+                    <span style="font-size: 16px; font-weight: 700;">${data.title}</span>
                     <div style="display: flex; align-items: center; gap: 10px;">
                         <span style="font-size: 12px;">Total: <strong>${data.total_vc_time}</strong></span>
                         <button onclick="${onClose}" style="
@@ -1778,8 +1952,16 @@ def vc_manager_farm_script():
                             const dur = hours > 0
                                 ? `${hours}h ${minutes}m ${seconds}s`
                                 : (minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`);
-                            const date = s.start_time ? s.start_time.split('T')[0] : '';
-                            row.innerHTML = '<div><div style="font-weight: 600; font-size: 13px;">#' + escapeHtml(cName) + '</div><div style="font-size: 11px;">' + escapeHtml(gName) + ' • ' + escapeHtml(date) + '</div></div><div style="background: rgba(255,255,255,0.06); font-weight: 700; font-size: 12px; padding: 3px 8px; border-radius: 6px;">' + escapeHtml(dur) + '</div>';
+                            const formatTime = value => {
+                                if (!value) return 'Unknown';
+                                const parsed = new Date(value);
+                                return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
+                            };
+                            const joined = formatTime(s.start_time);
+                            const endedValue = s.end_time || s.timestamp;
+                            const left = endedValue ? formatTime(endedValue) : 'Still connected';
+                            row.style.alignItems = 'flex-start';
+                            row.innerHTML = '<div style="min-width:0;"><div style="font-weight:600;font-size:13px;">#' + escapeHtml(cName) + '</div><div style="font-size:11px;margin-top:2px;">' + escapeHtml(gName) + '</div><div style="font-size:11px;margin-top:6px;line-height:1.45;"><strong>Joined:</strong> ' + escapeHtml(joined) + '<br><strong>Left:</strong> ' + escapeHtml(left) + '</div></div><div style="flex:0 0 auto;background:rgba(255,255,255,0.06);font-weight:700;font-size:12px;padding:3px 8px;border-radius:6px;">' + escapeHtml(dur) + '</div>';
                             list.appendChild(row);
                         });
                     }
@@ -1788,6 +1970,40 @@ def vc_manager_farm_script():
             element.style.opacity = '0';
             element.style.transition = 'opacity 0.15s ease-out';
             requestAnimationFrame(() => element.style.opacity = '1');
+            """
+
+        def remove_js(self):
+            return "element.style.opacity = '0';"
+
+    @cui_new(type="callable", name="UpdateAvailableModal")
+    class UpdateAvailableModal:
+        _init_params = ["self", "current_version", "latest_version", "project_url"]
+
+        def __init__(self, current_version=None, latest_version=None, project_url=None):
+            self.html = """
+                <div style="position:fixed;inset:0;width:100vw;height:100vh;z-index:999999;display:flex;align-items:center;justify-content:center;padding:14px;background:rgba(0,0,0,.72);backdrop-filter:blur(5px);">
+                <div style="width:min(430px,calc(100vw - 28px));padding:22px;background:#101214;border:1px solid rgba(255,255,255,.13);border-radius:12px;box-shadow:0 24px 70px rgba(0,0,0,.55);">
+                    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:18px;">
+                        <div>
+                            <div style="font-size:18px;font-weight:700;letter-spacing:-.02em;">VC Manager update available</div>
+                            <div style="margin-top:6px;font-size:13px;line-height:1.45;opacity:.74;">Your script is v${data.current_version}. The latest version is v${data.latest_version}.</div>
+                        </div>
+                        <button type="button" data-cui-close aria-label="Close update notice" style="width:30px;height:30px;border:1px solid rgba(255,255,255,.14);border-radius:8px;background:rgba(255,255,255,.05);cursor:pointer;font-size:18px;">&times;</button>
+                    </div>
+                    <div style="margin-top:16px;padding:12px 14px;border-radius:9px;background:rgba(255,255,255,.045);font-size:13px;line-height:1.45;">Open the repository, copy the latest <strong>VCManager.py</strong>, and replace the current Nighty script.</div>
+                    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
+                        <button type="button" data-cui-close style="padding:9px 13px;border:1px solid rgba(255,255,255,.14);border-radius:8px;background:transparent;cursor:pointer;font-weight:600;">Later</button>
+                        <a href="${data.project_url}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;padding:9px 13px;border-radius:8px;background:#4a6d88;text-decoration:none;font-weight:700;">Open repository</a>
+                    </div>
+                </div>
+                </div>
+            """
+
+        def create_js(self):
+            return """
+            element.querySelectorAll('[data-cui-close]').forEach(button => {
+                button.addEventListener('click', () => element.remove());
+            });
             """
 
         def remove_js(self):
@@ -1949,6 +2165,50 @@ def vc_manager_farm_script():
     def save_tokens(data):
         return write_json_file(TOKENS_DATA_PATH, data, "tokens")
 
+    def update_saved_token(token_id, **changes):
+        """Update one saved account without exposing its token in logs."""
+        token_id = str(token_id or "")
+        if not token_id:
+            return False
+        with file_lock:
+            data = load_tokens()
+            if data.get("_load_error"):
+                return False
+            for item in data.get("tokens", []):
+                if isinstance(item, dict) and str(item.get("id") or "") == token_id:
+                    item.update(changes)
+                    return save_tokens(data)
+        return False
+
+    def record_token_session(token_id, session):
+        """Append one managed-account voice session without exposing its token."""
+        token_id = str(token_id or "")
+        if not token_id or not isinstance(session, dict):
+            return False
+        with file_lock:
+            data = load_tokens()
+            if data.get("_load_error"):
+                return False
+            for item in data.get("tokens", []):
+                if not isinstance(item, dict) or str(item.get("id") or "") != token_id:
+                    continue
+                sessions = item.get("sessions", [])
+                if not isinstance(sessions, list):
+                    sessions = []
+                sessions.append(dict(session))
+                item["sessions"] = [entry for entry in sessions if isinstance(entry, dict)][-100:]
+                try:
+                    duration = max(0.0, float(session.get("duration_seconds", 0) or 0))
+                except (TypeError, ValueError):
+                    duration = 0.0
+                try:
+                    previous_total = max(0.0, float(item.get("total_vc_time_seconds", 0) or 0))
+                except (TypeError, ValueError):
+                    previous_total = 0.0
+                item["total_vc_time_seconds"] = previous_total + duration
+                return save_tokens(data)
+        return False
+
     # ==================== SCRIPT STATE ====================
 
     active_channel = None
@@ -1966,6 +2226,9 @@ def vc_manager_farm_script():
     is_leave_when_alone = False
     selected_server_id = None
     selected_channel_id = None
+    selected_token_id = None
+    selected_token_guild_id = None
+    selected_token_channel_id = None
     _updating_dropdowns = False
     ui_refs = {}
     status_editor_channel_id = None
@@ -2004,6 +2267,31 @@ def vc_manager_farm_script():
             .replace('"', "&quot;")
         )
         hue = int(getattr(guild, "id", 0) or 0) % 360
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">'
+            f'<rect width="64" height="64" rx="18" fill="hsl({hue},32%,34%)"/>'
+            f'<text x="32" y="38" text-anchor="middle" font-family="Arial,sans-serif" '
+            f'font-size="20" font-weight="700" fill="white">{initials}</text></svg>'
+        )
+        return "data:image/svg+xml;charset=UTF-8," + quote(svg)
+
+    def get_gateway_guild_icon_url(guild):
+        """Return an icon for a guild dictionary returned by Discord's API."""
+        guild_id = str(guild.get("id") or "0")
+        icon_hash = str(guild.get("icon") or "")
+        if icon_hash:
+            extension = "gif" if icon_hash.startswith("a_") else "png"
+            return f"https://cdn.discordapp.com/icons/{guild_id}/{icon_hash}.{extension}?size=64"
+        guild_name = str(guild.get("name") or "Server").strip()
+        words = [word for word in guild_name.split() if word]
+        initials = "".join(word[0] for word in words[:3]).upper() or "S"
+        initials = (
+            initials.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+        hue = int(guild_id or 0) % 360
         svg = (
             '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">'
             f'<rect width="64" height="64" rx="18" fill="hsl({hue},32%,34%)"/>'
@@ -2065,12 +2353,27 @@ def vc_manager_farm_script():
             task.add_done_callback(lambda completed: runtime_state["tasks"].discard(completed))
         return task
 
-    # Close gateway clients stored by the previous script load.
+    # Retire transports from the previous script generation without sending a
+    # voice leave. A script reload is not an instruction to disconnect.
+    async def retire_previous_client(previous_client):
+        try:
+            previous_client._closing = True
+            for task_name in ("heartbeat_task", "listener_task", "reconnect_task"):
+                task = getattr(previous_client, task_name, None)
+                if task and hasattr(task, "done") and not task.done():
+                    task.cancel()
+            previous_ws = getattr(previous_client, "ws", None)
+            if previous_ws and not previous_ws.closed:
+                await previous_ws.close()
+            previous_session = getattr(previous_client, "http_session", None)
+            if previous_session and not previous_session.closed:
+                await previous_session.close()
+        except Exception as error:
+            print(f"[VC Manager] Could not retire an old account transport: {error}", type_="ERROR")
+
     for previous_client in previous_token_clients:
         try:
-            close_result = previous_client.close()
-            if inspect.isawaitable(close_result):
-                safe_create_task(close_result)
+            safe_create_task(retire_previous_client(previous_client))
         except Exception as e:
             print(f"[VC Manager] Could not close a stale token client: {e}", type_="ERROR")
 
@@ -2092,12 +2395,14 @@ def vc_manager_farm_script():
         return gateway_start_lock
 
     class GatewayVoiceClient:
-        def __init__(self, token, name="Token"):
+        def __init__(self, token, name="Token", record_id=None):
             self.token = token.strip()
             self.name = name
+            self.record_id = str(record_id or "")
             self.ws = None
             self.http_session = None
             self.session_id = None
+            self.resume_gateway_url = None
             self.user_id = None
             self.avatar_url = ""
             self.sequence = None
@@ -2115,10 +2420,77 @@ def vc_manager_farm_script():
             self._starting = False
             self._reconnect_attempts = 0
             self._retry_delay = None
+            self._resume_on_hello = False
+            self._heartbeat_acknowledged = True
+            self._restore_task = None
+            self._terminal_failure = False
+            self._unexpected_voice_losses = 0
             self._last_logged_error = ""
             self._last_transport_error = ""
+            self.desired_guild_id = None
+            self.desired_channel_id = None
+            self.desired_muted = False
+            self.desired_deafened = False
+            self.desired_streaming = False
+            self.desired_camera = False
+            self.voice_session_started_at = None
+            self.voice_session_guild_id = None
+            self.voice_session_channel_id = None
+            self.guild_cache = []
+            self.channel_cache = {}
             self.status = "Starting"
             self.last_error = ""
+
+        def _voice_target_names(self, guild_id, channel_id):
+            guild_name = str(guild_id or "Server")
+            channel_name = str(channel_id or "Channel")
+            for guild in self.guild_cache:
+                if str(guild.get("id") or "") == str(guild_id or ""):
+                    guild_name = str(guild.get("name") or guild_name)
+                    break
+            for channel in self.channel_cache.get(str(guild_id or ""), []):
+                if str(channel.get("id") or "") == str(channel_id or ""):
+                    channel_name = str(channel.get("name") or channel_name)
+                    break
+            return guild_name, channel_name
+
+        def _begin_voice_session(self, guild_id, channel_id):
+            if not guild_id or not channel_id:
+                return
+            if (
+                self.voice_session_started_at
+                and self.voice_session_guild_id == str(guild_id)
+                and self.voice_session_channel_id == str(channel_id)
+            ):
+                return
+            if self.voice_session_started_at:
+                self._finish_voice_session("Moved")
+            self.voice_session_started_at = datetime.now()
+            self.voice_session_guild_id = str(guild_id)
+            self.voice_session_channel_id = str(channel_id)
+
+        def _finish_voice_session(self, reason="Left"):
+            if not self.voice_session_started_at:
+                return False
+            ended_at = datetime.now()
+            duration = max(0.0, (ended_at - self.voice_session_started_at).total_seconds())
+            guild_id = self.voice_session_guild_id
+            channel_id = self.voice_session_channel_id
+            guild_name, channel_name = self._voice_target_names(guild_id, channel_id)
+            session = {
+                "guild_id": guild_id,
+                "guild_name": guild_name,
+                "channel_id": channel_id,
+                "channel_name": channel_name,
+                "start_time": self.voice_session_started_at.isoformat(),
+                "end_time": ended_at.isoformat(),
+                "duration_seconds": duration,
+                "reason": str(reason or "Left"),
+            }
+            self.voice_session_started_at = None
+            self.voice_session_guild_id = None
+            self.voice_session_channel_id = None
+            return record_token_session(self.record_id, session)
 
         def _refresh_row(self):
             try:
@@ -2173,7 +2545,7 @@ def vc_manager_farm_script():
                 4004: ("Token rejected", "Discord rejected this token. Remove the account, copy a fresh token, and add it again.", False, None),
                 4005: ("Gateway reconnecting", "Discord detected a duplicate login attempt. VC Manager will retry after a cooldown.", True, 12),
                 4007: ("Gateway reconnecting", "Discord rejected the previous sequence. VC Manager will open a fresh session.", True, 8),
-                4008: ("Rate limited", "Discord rate-limited this account's gateway. VC Manager will wait one minute before retrying.", True, 60),
+                4008: ("Rate limited", "Discord rate-limited this account's gateway. VC Manager will wait five minutes before retrying.", True, 300),
                 4009: ("Gateway reconnecting", "The Discord gateway session timed out. VC Manager will open a fresh session.", True, 8),
                 4010: ("Gateway rejected", "Discord rejected the gateway shard configuration. Reload the updated script.", False, None),
                 4011: ("Gateway rejected", "Discord requires sharding for this account session, which VC Manager cannot provide.", False, None),
@@ -2190,6 +2562,136 @@ def vc_manager_farm_script():
                 None,
             )
 
+        @staticmethod
+        def _api_error_message(status, payload=None, operation="contact Discord"):
+            payload = payload if isinstance(payload, dict) else {}
+            api_message = str(payload.get("message") or "").strip()
+            api_code = payload.get("code")
+            if status == 401:
+                return (
+                    "Discord rejected this token. It may be expired, reset, or copied incorrectly. "
+                    "Remove the account and add a fresh token. VC Manager will not retry it automatically."
+                )
+            if status == 403:
+                details = f" Discord said: {api_message}." if api_message else ""
+                if api_code in (40002, 40003) or "verify" in api_message.lower():
+                    return (
+                        "Discord requires email, phone, or account verification before this account can continue. "
+                        "Complete the check in Discord, then reconnect the account." + details
+                    )
+                return (
+                    f"This account is not allowed to {operation}. Check its server membership, timeout state, "
+                    f"and channel permissions.{details}"
+                )
+            if status == 429:
+                return "Discord rate-limited this account. VC Manager paused requests; wait before trying again."
+            if status >= 500:
+                return "Discord is temporarily unavailable. VC Manager will retry after a cooldown."
+            details = f" Discord said: {api_message}." if api_message else ""
+            return f"Discord returned HTTP {status} while trying to {operation}.{details}"
+
+        async def _api_get(self, path, operation, attempts=2):
+            if self._terminal_failure:
+                return None
+            if self.http_session is None or self.http_session.closed:
+                self.http_session = self._new_http_session()
+            url = f"https://discord.com/api/v10{path}"
+            headers = {"Authorization": self.token}
+            timeout = aiohttp.ClientTimeout(total=15)
+            for attempt in range(max(1, attempts)):
+                try:
+                    async with self.http_session.get(url, headers=headers, timeout=timeout) as response:
+                        try:
+                            payload = await response.json(content_type=None)
+                        except Exception:
+                            payload = None
+                        if response.status == 200:
+                            return payload
+                        error = self._api_error_message(response.status, payload, operation)
+                        if response.status == 401:
+                            self._terminal_failure = True
+                            self._set_status("Token rejected", error)
+                            return None
+                        if response.status == 429 and attempt + 1 < attempts:
+                            retry_after = 2.0
+                            if isinstance(payload, dict):
+                                try:
+                                    retry_after = min(max(float(payload.get("retry_after", 2.0)), 1.0), 15.0)
+                                except (TypeError, ValueError):
+                                    pass
+                            await asyncio.sleep(retry_after)
+                            continue
+                        self._set_status("Request blocked" if response.status == 403 else "Request failed", error)
+                        return None
+                except asyncio.TimeoutError:
+                    if attempt + 1 >= attempts:
+                        self._set_status("Request timed out", f"Discord did not answer while trying to {operation}. Check the connection and try again.")
+                except aiohttp.ClientError as error:
+                    if attempt + 1 >= attempts:
+                        print(f"[VC Manager] {self.name} API transport error: {type(error).__name__}: {error}", type_="ERROR")
+                        self._set_status("Network error", f"Nighty could not {operation}. Check the connection, VPN, or firewall.")
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(2 + attempt * 2)
+            return None
+
+        async def fetch_guilds(self, force=False):
+            if self.guild_cache and not force:
+                return list(self.guild_cache)
+            payload = await self._api_get("/users/@me/guilds?with_counts=true", "load this account's servers")
+            if not isinstance(payload, list):
+                return []
+            guilds = []
+            for guild in payload:
+                if not isinstance(guild, dict) or not guild.get("id"):
+                    continue
+                guilds.append({
+                    "id": str(guild["id"]),
+                    "name": str(guild.get("name") or "Unnamed server"),
+                    "icon": str(guild.get("icon") or ""),
+                })
+            guilds.sort(key=lambda item: item["name"].casefold())
+            self.guild_cache = guilds
+            return list(guilds)
+
+        async def fetch_voice_channels(self, guild_id, force=False):
+            guild_id = str(guild_id or "")
+            if not guild_id:
+                return []
+            if guild_id in self.channel_cache and not force:
+                return list(self.channel_cache[guild_id])
+            payload = await self._api_get(f"/guilds/{guild_id}/channels", "load this server's voice channels")
+            if not isinstance(payload, list):
+                return []
+            channels = []
+            for channel in payload:
+                if not isinstance(channel, dict) or int(channel.get("type", -1)) not in (2, 13):
+                    continue
+                channels.append({
+                    "id": str(channel.get("id")),
+                    "name": str(channel.get("name") or "Voice channel"),
+                    "position": int(channel.get("position", 0) or 0),
+                    "user_limit": int(channel.get("user_limit", 0) or 0),
+                })
+            channels.sort(key=lambda item: (item["position"], item["name"].casefold()))
+            self.channel_cache[guild_id] = channels
+            return list(channels)
+
+        def set_desired_voice(self, guild_id, channel_id, mute=False, deaf=False, stream=False, video=False):
+            self.desired_guild_id = str(guild_id) if guild_id else None
+            self.desired_channel_id = str(channel_id) if channel_id else None
+            self.desired_muted = bool(mute)
+            self.desired_deafened = bool(deaf)
+            self.desired_streaming = bool(stream)
+            self.desired_camera = bool(video)
+
+        def clear_desired_voice(self):
+            self.desired_guild_id = None
+            self.desired_channel_id = None
+            self._unexpected_voice_losses = 0
+            if self._restore_task and not self._restore_task.done():
+                self._restore_task.cancel()
+            self._restore_task = None
+
         async def _channel_access_error(self, channel_id):
             """Return a plain-language channel access error, or an empty string."""
             try:
@@ -2203,24 +2705,28 @@ def vc_manager_farm_script():
                     async with self.http_session.get(url, headers=headers, timeout=timeout) as response:
                         if response.status == 200:
                             return ""
+                        try:
+                            payload = await response.json(content_type=None)
+                        except Exception:
+                            payload = None
                         if response.status == 401:
-                            return "Discord rejected this token. Remove the account, copy a fresh token, and add it again."
+                            self._terminal_failure = True
+                            return self._api_error_message(401, payload, "open the selected voice channel")
                         if response.status == 403:
-                            return "This account cannot open the selected voice channel. Check View Channel and Connect permissions for its roles."
+                            return self._api_error_message(403, payload, "open the selected voice channel")
                         if response.status == 404:
                             return "This account cannot access the selected channel. Check its server membership and channel permissions."
                         if response.status == 429:
                             retry_after = 1.0
                             try:
-                                payload = await response.json(content_type=None)
                                 retry_after = min(max(float(payload.get("retry_after", 1.0)), 0.25), 3.0)
                             except Exception:
                                 pass
                             if attempt == 0:
                                 await asyncio.sleep(retry_after)
                                 continue
-                            return "Discord rate-limited this account. Wait a minute, then press Join All again."
-                        return f"Discord returned HTTP {response.status} while checking channel access. Try again after restarting Nighty."
+                            return "Discord rate-limited this account. VC Manager paused the request. Wait a few minutes, then try again."
+                        return self._api_error_message(response.status, payload, "open the selected voice channel")
             except TimeoutError:
                 return "Discord did not answer the channel check. Check your connection and try again."
             except Exception as e:
@@ -2228,7 +2734,137 @@ def vc_manager_farm_script():
                 return "The channel check failed. Open the Nighty console for the technical error."
             return ""
 
+        async def _send_gateway_login(self):
+            if self._resume_on_hello and self.session_id and self.sequence is not None:
+                await self.ws.send_json({
+                    "op": 6,
+                    "d": {
+                        "token": self.token,
+                        "session_id": self.session_id,
+                        "seq": self.sequence,
+                    },
+                })
+                return
+            await self.ws.send_json({
+                "op": 2,
+                "d": {
+                    "token": self.token,
+                    "capabilities": 16381,
+                    "properties": {
+                        "os": "Windows",
+                        "browser": "Discord Client",
+                        "device": "desktop",
+                    },
+                    "presence": {"status": "online", "since": 0, "activities": [], "afk": False},
+                },
+            })
+
+        async def _restore_desired_voice(self):
+            if (
+                self._closing
+                or not self.desired_guild_id
+                or not self.desired_channel_id
+                or not self.ws
+                or self.ws.closed
+            ):
+                return False
+            if self.is_in_vc and self.current_channel_id == self.desired_channel_id:
+                return True
+            access_error = await self._channel_access_error(self.desired_channel_id)
+            if access_error:
+                self._set_status("Cannot rejoin", access_error)
+                return False
+            self._set_status("Restoring voice")
+            try:
+                await self.ws.send_json({
+                    "op": 4,
+                    "d": {
+                        "guild_id": self.desired_guild_id,
+                        "channel_id": self.desired_channel_id,
+                        "self_mute": self.desired_muted,
+                        "self_deaf": self.desired_deafened,
+                        "self_video": self.desired_camera,
+                    },
+                })
+                if self.desired_streaming:
+                    await self.ws.send_json({
+                        "op": 18,
+                        "d": {
+                            "type": "guild",
+                            "guild_id": self.desired_guild_id,
+                            "channel_id": self.desired_channel_id,
+                            "preferred_region": None,
+                        },
+                    })
+                return True
+            except Exception as error:
+                print(f"[VC Manager] Could not restore voice for {self.name}: {error}", type_="ERROR")
+                self._set_status("Rejoin failed", "Discord did not accept the voice restore request. VC Manager will keep retrying with a longer delay until you press Leave.")
+                return False
+
+        def _schedule_voice_restore(self, initial_delay=0):
+            if self._closing or self._terminal_failure or not self.desired_channel_id:
+                return None
+            existing = self._restore_task
+            if existing and not existing.done():
+                return existing
+            expected_channel = self.desired_channel_id
+
+            async def restore_until_connected():
+                wait_seconds = max(float(initial_delay or 0), 0.0)
+                attempts = 0
+                while (
+                    not self._closing
+                    and not self._terminal_failure
+                    and self.desired_channel_id == expected_channel
+                ):
+                    if wait_seconds:
+                        await asyncio.sleep(wait_seconds)
+                    if self.is_in_vc and self.current_channel_id == expected_channel:
+                        return
+                    await self._restore_desired_voice()
+                    for _ in range(25):
+                        if self.is_in_vc and self.current_channel_id == expected_channel:
+                            return
+                        if self._closing or self.desired_channel_id != expected_channel:
+                            return
+                        await asyncio.sleep(0.2)
+                    attempts += 1
+                    wait_seconds = min(15 * (2 ** min(attempts, 4)), 300)
+                    self._set_status(
+                        "Voice reconnecting",
+                        f"Discord has not restored this account yet. VC Manager will try again in {wait_seconds} seconds unless you press Leave.",
+                    )
+
+            self._restore_task = safe_create_task(restore_until_connected())
+            return self._restore_task
+
+        def _schedule_reconnect(self, delay=None):
+            if self._closing or self._terminal_failure:
+                return None
+            existing = self.reconnect_task
+            if existing and not existing.done():
+                return existing
+
+            async def reconnect_until_open():
+                next_delay = max(float(delay or 0), 0.0)
+                while not self._closing and not self._terminal_failure:
+                    if next_delay:
+                        await asyncio.sleep(next_delay)
+                    if self._closing or self._terminal_failure:
+                        return
+                    if await self.start_gateway():
+                        return
+                    self._reconnect_attempts += 1
+                    base_delay = min(5 * (2 ** min(self._reconnect_attempts - 1, 5)), 300)
+                    next_delay = base_delay + random.uniform(0.0, min(5.0, base_delay * 0.15))
+
+            self.reconnect_task = safe_create_task(reconnect_until_open())
+            return self.reconnect_task
+
         async def start_gateway(self):
+            if self._terminal_failure:
+                return False
             if self.ws and not self.ws.closed:
                 return True
             if self._starting:
@@ -2246,17 +2882,17 @@ def vc_manager_farm_script():
                 self._set_status("Connecting")
                 if self.http_session is None or self.http_session.closed:
                     self.http_session = self._new_http_session()
-                self.session_id = None
-                self.user_id = None
-                self.sequence = None
+                self._resume_on_hello = bool(self.session_id and self.sequence is not None)
                 start_lock = await wait_for_gateway_start_slot()
             # Discord starts an opcode heartbeat after HELLO. Disable aiohttp's
             # WebSocket ping timer because zero can trigger a timeout at once.
             # Limit the opening handshake with asyncio.wait_for; some aiohttp
             # builds treat ws_connect's numeric timeout as a receive timeout.
+                gateway_base = self.resume_gateway_url or "wss://gateway.discord.gg"
+                gateway_url = f"{gateway_base.rstrip('/')}/?v=10&encoding=json"
                 self.ws = await asyncio.wait_for(
                     self.http_session.ws_connect(
-                        "wss://gateway.discord.gg/?v=10&encoding=json",
+                        gateway_url,
                         heartbeat=None,
                         autoclose=True,
                         autoping=True,
@@ -2275,6 +2911,8 @@ def vc_manager_farm_script():
                     await self.http_session.close()
                 self.http_session = None
                 self.ws = None
+                if self.desired_channel_id and not self._closing and not self._terminal_failure:
+                    self._schedule_reconnect(15)
                 return False
             finally:
                 if start_lock and start_lock.locked():
@@ -2283,14 +2921,25 @@ def vc_manager_farm_script():
 
         async def _heartbeat(self, interval):
             try:
+                interval_seconds = max(float(interval) / 1000.0, 1.0)
+                await asyncio.sleep(random.random() * interval_seconds)
                 while self.ws and not self.ws.closed:
-                    await asyncio.sleep(interval / 1000.0)
-                    if self.ws and not self.ws.closed:
-                        await self.ws.send_json({"op": 1, "d": self.sequence})
+                    if not self._heartbeat_acknowledged:
+                        self._retry_delay = 5
+                        self._set_status(
+                            "Reconnecting",
+                            "Discord stopped acknowledging this account's gateway heartbeat. VC Manager is opening a fresh connection.",
+                        )
+                        await self.ws.close(code=4000, message=b"Heartbeat ACK timeout")
+                        return
+                    self._heartbeat_acknowledged = False
+                    await self.ws.send_json({"op": 1, "d": self.sequence})
+                    await asyncio.sleep(interval_seconds)
             except asyncio.CancelledError:
                 pass
-            except Exception:
-                pass
+            except Exception as error:
+                if not self._closing:
+                    print(f"[VC Manager] Heartbeat stopped for {self.name}: {error}", type_="ERROR")
 
         async def _gateway_loop(self):
             should_reconnect = True
@@ -2306,22 +2955,18 @@ def vc_manager_farm_script():
 
                         if op == 10:
                             interval = d["heartbeat_interval"]
+                            self._heartbeat_acknowledged = True
                             self.heartbeat_task = safe_create_task(self._heartbeat(interval))
-                            await self.ws.send_json({
-                                "op": 2,
-                                "d": {
-                                    "token": self.token,
-                                    "capabilities": 16381,
-                                    "properties": {
-                                        "os": "Windows",
-                                        "browser": "Discord Client",
-                                        "device": "desktop"
-                                    },
-                                    "presence": {"status": "online", "since": 0, "activities": [], "afk": False}
-                                }
-                            })
+                            await self._send_gateway_login()
+                        elif op == 1:
+                            await self.ws.send_json({"op": 1, "d": self.sequence})
+                        elif op == 11:
+                            self._heartbeat_acknowledged = True
                         elif t == "READY":
                             self.session_id = d.get("session_id")
+                            resume_url = str(d.get("resume_gateway_url") or "").strip()
+                            if resume_url:
+                                self.resume_gateway_url = resume_url
                             user = d.get("user") or {}
                             self.user_id = str(user.get("id")) if user.get("id") else None
                             avatar_hash = str(user.get("avatar") or "")
@@ -2334,22 +2979,60 @@ def vc_manager_farm_script():
                             elif self.user_id:
                                 avatar_index = (int(self.user_id) >> 22) % 6
                                 self.avatar_url = f"https://cdn.discordapp.com/embed/avatars/{avatar_index}.png"
+                            try:
+                                refresh_destination_account_items(preserve_selection=True)
+                            except (NameError, RuntimeError):
+                                pass
                             self._reconnect_attempts = 0
                             self._set_status("Ready")
+                            if self.desired_channel_id:
+                                self._schedule_voice_restore()
+                        elif t == "RESUMED":
+                            self._reconnect_attempts = 0
+                            self._set_status("Connected" if self.desired_channel_id else "Ready")
+                            if self.desired_channel_id:
+                                self._schedule_voice_restore()
                         elif t == "VOICE_STATE_UPDATE":
                             if self.user_id and str(d.get("user_id")) == self.user_id:
+                                was_in_vc = self.is_in_vc
+                                previous_guild_id = self.current_guild_id
+                                previous_channel_id = self.current_channel_id
                                 channel_id = d.get("channel_id")
                                 guild_id = d.get("guild_id")
                                 self.is_in_vc = channel_id is not None
                                 self.current_channel_id = str(channel_id) if channel_id else None
                                 self.current_guild_id = str(guild_id) if channel_id and guild_id else None
                                 if not channel_id:
+                                    if was_in_vc or self.voice_session_started_at:
+                                        self._finish_voice_session(
+                                            "Disconnected" if self.desired_channel_id else "Left"
+                                        )
                                     self.is_muted = False
                                     self.is_deafened = False
                                     self.is_streaming = False
                                     self.is_camera_on = False
-                                    self._set_status("Ready")
+                                    if self.desired_channel_id and not self._closing:
+                                        self._unexpected_voice_losses += 1
+                                        delay = min(15 * (2 ** min(self._unexpected_voice_losses - 1, 4)), 300)
+                                        self._set_status(
+                                            "Voice disconnected",
+                                            f"Discord removed this account from voice. VC Manager will retry in {delay} seconds unless you press Leave.",
+                                        )
+                                        if self._restore_task and not self._restore_task.done():
+                                            self._restore_task.cancel()
+                                        self._restore_task = None
+                                        self._schedule_voice_restore(delay)
+                                    else:
+                                        self._set_status("Ready")
                                 else:
+                                    if (
+                                        was_in_vc
+                                        and previous_channel_id
+                                        and str(previous_channel_id) != str(channel_id)
+                                    ):
+                                        self._finish_voice_session("Moved")
+                                    self._begin_voice_session(guild_id or previous_guild_id, channel_id)
+                                    self._unexpected_voice_losses = 0
                                     self.is_muted = bool(d.get("self_mute", self.is_muted))
                                     self.is_deafened = bool(d.get("self_deaf", self.is_deafened))
                                     self.is_streaming = bool(d.get("self_stream", self.is_streaming))
@@ -2359,12 +3042,20 @@ def vc_manager_farm_script():
                             self._set_status("Reconnecting")
                             await self.ws.close()
                         elif op == 9:
+                            can_resume = bool(d)
+                            if not can_resume:
+                                self.session_id = None
+                                self.sequence = None
+                                self.resume_gateway_url = None
+                                self._resume_on_hello = False
                             self._retry_delay = 8
                             self._set_status("Reconnecting")
                             await self.ws.close()
                     elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
                         close_code = getattr(self.ws, "close_code", None)
                         status, message, should_reconnect, retry_delay = self._gateway_close_details(close_code)
+                        if not should_reconnect:
+                            self._terminal_failure = True
                         self._retry_delay = retry_delay
                         if close_code or not self._closing:
                             self._set_status(status, message)
@@ -2374,6 +3065,8 @@ def vc_manager_farm_script():
                         close_code_value = self._normalise_close_code(close_code)
                         exception = self.ws.exception() if self.ws else None
                         status, message, should_reconnect, retry_delay = self._gateway_close_details(close_code)
+                        if not should_reconnect:
+                            self._terminal_failure = True
                         self._retry_delay = retry_delay
                         if exception:
                             exception_text = str(exception).strip() or "no additional details"
@@ -2403,17 +3096,16 @@ def vc_manager_farm_script():
                 self.current_guild_id = None
                 if self.heartbeat_task and not self.heartbeat_task.done():
                     self.heartbeat_task.cancel()
+                if self._restore_task and not self._restore_task.done():
+                    self._restore_task.cancel()
+                self._restore_task = None
                 self._refresh_row()
                 if not self._closing and should_reconnect:
                     self._reconnect_attempts += 1
-                    delay = self._retry_delay or min(5 * self._reconnect_attempts, 60)
+                    delay = self._retry_delay or min(5 * (2 ** min(self._reconnect_attempts - 1, 5)), 300)
+                    delay += random.uniform(0.0, min(5.0, delay * 0.15))
                     self._retry_delay = None
-                    async def reconnect_later():
-                        await asyncio.sleep(delay)
-                        if self._closing:
-                            return
-                        await self.start_gateway()
-                    self.reconnect_task = safe_create_task(reconnect_later())
+                    self._schedule_reconnect(delay)
 
         async def join_vc(self, guild_id, channel_id, mute=False, deaf=False, stream=False, video=False):
             if not await self.start_gateway():
@@ -2436,14 +3128,43 @@ def vc_manager_farm_script():
                     self._set_status("Login failed", "The account gateway closed before Discord confirmed the login. Add the account again with a fresh token.")
                 return False
 
+            if not any(
+                str(guild.get("id") or "") == str(guild_id)
+                for guild in self.guild_cache
+            ):
+                await self.fetch_guilds(force=False)
+
             if self.is_in_vc and self.current_channel_id == str(channel_id):
+                self.set_desired_voice(guild_id, channel_id, mute, deaf, stream, video)
+                self._begin_voice_session(guild_id, channel_id)
                 self._set_status("Connected")
+                state_saved = update_saved_token(
+                    self.record_id,
+                    preferred_guild_id=str(guild_id),
+                    preferred_channel_id=str(channel_id),
+                    stay_connected=True,
+                    muted=self.is_muted,
+                    deafened=self.is_deafened,
+                    streaming=self.is_streaming,
+                    camera_on=self.is_camera_on,
+                )
+                if not state_saved:
+                    self.last_error = (
+                        "Connected, but Nighty could not save this destination. "
+                        "Keep Nighty open and check the scripts JSON folder permissions."
+                    )
                 return True
+
+            access_error = await self._channel_access_error(channel_id)
+            if access_error:
+                self._set_status("Join blocked", access_error)
+                return False
 
             self.is_muted = bool(mute)
             self.is_deafened = bool(deaf)
             self.is_streaming = bool(stream)
             self.is_camera_on = bool(video)
+            self.set_desired_voice(guild_id, channel_id, mute, deaf, stream, video)
             self._set_status("Joining")
 
             payload = {
@@ -2480,12 +3201,28 @@ def vc_manager_farm_script():
                         except Exception as e:
                             print(f"[VC Manager] Stream-state request failed for {self.name}: {e}", type_="ERROR")
                     self._set_status("Connected")
+                    state_saved = update_saved_token(
+                        self.record_id,
+                        preferred_guild_id=str(guild_id),
+                        preferred_channel_id=str(channel_id),
+                        stay_connected=True,
+                        muted=self.is_muted,
+                        deafened=self.is_deafened,
+                        streaming=self.is_streaming,
+                        camera_on=self.is_camera_on,
+                    )
+                    if not state_saved:
+                        self.last_error = (
+                            "Connected, but Nighty could not save this destination. "
+                            "Keep Nighty open and check the scripts JSON folder permissions."
+                        )
                     return True
                 if not self.ws or self.ws.closed:
                     break
                 await asyncio.sleep(0.2)
 
             access_error = await self._channel_access_error(channel_id)
+            self.clear_desired_voice()
             self.current_channel_id = None
             self.current_guild_id = None
             self.is_in_vc = False
@@ -2527,12 +3264,16 @@ def vc_manager_farm_script():
             )
             if mute is not None:
                 self.is_muted = as_bool(mute)
+                self.desired_muted = self.is_muted
             if deaf is not None:
                 self.is_deafened = as_bool(deaf)
+                self.desired_deafened = self.is_deafened
             if stream is not None:
                 self.is_streaming = as_bool(stream)
+                self.desired_streaming = self.is_streaming
             if video is not None:
                 self.is_camera_on = as_bool(video)
+                self.desired_camera = self.is_camera_on
 
             try:
                 if mute is not None or deaf is not None or video is not None:
@@ -2581,9 +3322,18 @@ def vc_manager_farm_script():
                 return False
 
             self._set_status("Connected")
+            update_saved_token(
+                self.record_id,
+                muted=self.is_muted,
+                deafened=self.is_deafened,
+                streaming=self.is_streaming,
+                camera_on=self.is_camera_on,
+            )
             return True
 
         async def leave_vc(self):
+            self.clear_desired_voice()
+            update_saved_token(self.record_id, stay_connected=False)
             if not self.current_guild_id or not self.ws or self.ws.closed:
                 if self.user_id:
                     self._set_status("Ready")
@@ -2603,15 +3353,16 @@ def vc_manager_farm_script():
                 print(f"[VC Manager] Voice leave packet failed for {self.name}: {e}", type_="ERROR")
                 self._set_status("Leave failed", "Could not send the disconnect request. Restart Nighty if the account still appears connected.")
                 return False
+            self._finish_voice_session("Left")
             self.is_in_vc = False
             self.current_channel_id = None
             self.current_guild_id = None
             self._set_status("Ready")
             return True
 
-        async def close(self):
+        async def close(self, preserve_voice=False):
             self._closing = True
-            if self.current_guild_id and self.ws and not self.ws.closed:
+            if not preserve_voice and self.current_guild_id and self.ws and not self.ws.closed:
                 await self.leave_vc()
             if self.heartbeat_task:
                 self.heartbeat_task.cancel()
@@ -2619,6 +3370,8 @@ def vc_manager_farm_script():
                 self.listener_task.cancel()
             if self.reconnect_task:
                 self.reconnect_task.cancel()
+            if self._restore_task:
+                self._restore_task.cancel()
             if self.ws and not self.ws.closed:
                 await self.ws.close()
             if self.http_session and not self.http_session.closed:
@@ -2632,10 +3385,13 @@ def vc_manager_farm_script():
             print(f"[VC Manager] {data['_load_error']}", type_="ERROR")
             return
         current_ids = set()
+        data_changed = False
         for idx, item in enumerate(data.get("tokens", [])):
             if not isinstance(item, dict):
                 continue
             tok_id = str(item.get("id") or uuid.uuid4())
+            if str(item.get("id") or "") != tok_id:
+                data_changed = True
             item["id"] = tok_id
             token_str = str(item.get("token", "")).strip()
             name_str = str(item.get("label") or item.get("name") or f"Token #{idx+1}")
@@ -2647,16 +3403,44 @@ def vc_manager_farm_script():
                 del token_clients[tok_id]
                 existing = None
             if not existing and token_str:
-                token_clients[tok_id] = GatewayVoiceClient(token_str, name=name_str)
-                safe_create_task(token_clients[tok_id].start_gateway())
+                client = GatewayVoiceClient(token_str, name=name_str, record_id=tok_id)
+                token_clients[tok_id] = client
+                previous_voice = previous_token_states.get(tok_id, {})
+                should_restore = as_bool(item.get("stay_connected", False)) or bool(previous_voice)
+                if should_restore:
+                    preferred_guild = str(previous_voice.get("guild_id") or item.get("preferred_guild_id") or "")
+                    preferred_channel = str(previous_voice.get("channel_id") or item.get("preferred_channel_id") or "")
+                    if preferred_guild and preferred_channel:
+                        client.set_desired_voice(
+                            preferred_guild,
+                            preferred_channel,
+                            previous_voice.get("muted", item.get("muted", False)),
+                            previous_voice.get("deafened", item.get("deafened", False)),
+                            previous_voice.get("streaming", item.get("streaming", False)),
+                            previous_voice.get("camera_on", item.get("camera_on", False)),
+                        )
+                        if isinstance(previous_voice.get("session_started_at"), datetime):
+                            client.voice_session_started_at = previous_voice["session_started_at"]
+                            client.voice_session_guild_id = str(previous_voice.get("session_guild_id") or preferred_guild)
+                            client.voice_session_channel_id = str(previous_voice.get("session_channel_id") or preferred_channel)
+                        item.update({
+                            "preferred_guild_id": preferred_guild,
+                            "preferred_channel_id": preferred_channel,
+                            "stay_connected": True,
+                        })
+                        data_changed = True
+                safe_create_task(client.start_gateway())
             elif existing:
                 existing.name = name_str
+                existing.record_id = tok_id
 
         # Cleanup removed tokens
         for tid in list(token_clients.keys()):
             if tid not in current_ids:
                 safe_create_task(token_clients[tid].close())
                 del token_clients[tid]
+        if data_changed:
+            save_tokens(data)
 
         if not save_tokens(data):
             print("[VC Manager] Managed account IDs could not be saved. Existing token data was not replaced.", type_="ERROR")
@@ -2829,6 +3613,15 @@ def vc_manager_farm_script():
         else:
             return f"{secs}s"
 
+    def format_session_time(value):
+        if not value:
+            return "Unknown"
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.strftime("%b %d, %Y %I:%M:%S %p")
+        except (TypeError, ValueError):
+            return str(value)
+
     def record_session(channel, started_at):
         if not channel or not started_at:
             return
@@ -2841,11 +3634,33 @@ def vc_manager_farm_script():
             "channel_name": getattr(channel, "name", "Voice Channel"),
             "guild_name": getattr(getattr(channel, "guild", None), "name", "Unknown"),
             "start_time": started_at.isoformat(),
+            "end_time": ended_at.isoformat(),
             "timestamp": ended_at.isoformat(),
-            "duration_seconds": duration
+            "duration_seconds": duration,
+            "reason": "Left",
         })
         data["sessions"] = data["sessions"][-500:]
         save_data(data)
+
+    def get_primary_session_history(include_live=True):
+        sessions = [
+            dict(session) for session in load_data().get("sessions", [])
+            if isinstance(session, dict)
+        ]
+        current = get_current_voice_channel()
+        if include_live and current and connection_start_time:
+            sessions.append({
+                "channel_id": str(current.id),
+                "channel_name": current.name,
+                "guild_name": current.guild.name,
+                "start_time": connection_start_time.isoformat(),
+                "duration_seconds": max(
+                    0.0,
+                    (datetime.now() - connection_start_time).total_seconds(),
+                ),
+                "reason": "Active",
+            })
+        return sessions
 
     def get_bot_ws(guild_id=None):
         if hasattr(bot, "_get_websocket"):
@@ -3862,15 +4677,17 @@ def vc_manager_farm_script():
         async def slash_vc_history(ctx):
             if not await slash_owner_only(ctx):
                 return
-            sessions = load_data().get("sessions", [])[-5:]
+            sessions = get_primary_session_history(include_live=True)[-5:]
             if not sessions:
                 return await ctx.send_v2("Session History", "No voice sessions.")
             lines = [
-                f"- **#{session.get('channel_name', '?')}** in **{session.get('guild_name', '?')}**: "
-                f"{format_duration(session.get('duration_seconds', 0))}"
+                f"**#{session.get('channel_name', '?')}** in **{session.get('guild_name', '?')}**\n"
+                f"Joined: {format_session_time(session.get('start_time'))}\n"
+                f"Left: {format_session_time(session.get('end_time') or session.get('timestamp')) if (session.get('end_time') or session.get('timestamp')) else 'Still connected'}\n"
+                f"Duration: {format_duration(session.get('duration_seconds', 0))}"
                 for session in reversed(sessions)
             ]
-            await ctx.send_v2("Recent Voice Sessions", "\n".join(lines))
+            await ctx.send_v2("Recent Voice Sessions", "\n\n".join(lines))
 
         @vc_group.command(name="status", description="Show the managed voice connection state")
         async def slash_vc_status(ctx):
@@ -4031,9 +4848,14 @@ def vc_manager_farm_script():
     # ===== COLUMN 1 (LEFT) =====
     col1 = main.create_container(type="rows", width="auto", height="auto", gap=4)
 
-    # Voice Connection Card
+    # Primary connection card
     connection_card = col1.create_card(type="rows", height="auto", gap=3, disallow_shrink=True)
-    connection_card.create_ui_element(UI.Text, content="Voice Connection", size="lg", weight="bold")
+    connection_card.create_ui_element(
+        UI.Text,
+        content=f"VC Manager v{SCRIPT_VERSION}",
+        size="lg",
+        weight="bold",
+    )
 
     initial_guild_items = [
         {
@@ -4244,23 +5066,118 @@ def vc_manager_farm_script():
     ui_refs["command_detailed_toggle"] = command_detailed_toggle
 
     # 2. MULTI-TOKEN CONTAINER
-    # Stack these cards so the account table can use the viewport width.
     multi_token_container = tab.create_container(type="rows", width="full", height="auto", gap=4)
+    multi_token_setup_row = multi_token_container.create_container(
+        type="columns", width="full", height="auto", gap=4
+    )
 
-    token_card = multi_token_container.create_card(type="rows", width="full", height="auto", gap=3)
-    token_card.create_ui_element(UI.Text, content="Multi-Token Accounts", size="lg", weight="bold")
-    token_card.create_ui_element(UI.Text, content="Connect secondary user accounts", size="sm")
+    token_card = multi_token_setup_row.create_card(type="rows", width="full", height="auto", gap=3)
+    token_pager = CardPager(token_card, max_height=320)
+    token_pager_page = token_pager.create_page()
+    token_add_page = token_pager_page.create_group(type="rows", gap=3, full_width=True)
+    token_add_page.create_ui_element(UI.Text, content="Multi-Token Accounts", size="lg", weight="bold")
+    token_add_page.create_ui_element(UI.Text, content="Connect secondary user accounts", size="sm")
 
-    token_input = token_card.create_ui_element(UI.Input, label="User Token", placeholder="Paste Discord token...", full_width=True)
-    token_name_input = token_card.create_ui_element(UI.Input, label="Account Label", placeholder="e.g. Alt #1", full_width=True)
+    token_input = token_add_page.create_ui_element(UI.Input, label="User Token", placeholder="Paste Discord token...", full_width=True)
+    token_name_input = token_add_page.create_ui_element(UI.Input, label="Account Label", placeholder="e.g. Alt #1", full_width=True)
 
-    token_btn_group = token_card.create_group(type="columns", gap=2)
+    token_btn_group = token_add_page.create_group(type="columns", gap=2)
     add_token_btn = token_btn_group.create_ui_element(UI.Button, label="Add Account", variant="solid", color="primary")
-    conn_all_btn = token_btn_group.create_ui_element(UI.Button, label="Join All", variant="solid", color="success")
-    disc_all_btn = token_btn_group.create_ui_element(UI.Button, label="Leave All", variant="solid", color="danger")
+
+    token_bulk_page = token_pager_page.create_group(type="rows", gap=3, full_width=True)
+    token_bulk_page.create_ui_element(UI.Text, content="Bulk Account Controls", size="lg", weight="bold")
+    token_bulk_page.create_ui_element(
+        UI.Text,
+        content="Join saved destinations and apply one voice state to every managed account.",
+        size="sm",
+    )
+    bulk_voice_state = {
+        "mute": bool(is_muted),
+        "deaf": bool(is_deafened),
+        "stream": bool(is_streaming),
+        "video": bool(is_camera_on),
+    }
+    bulk_mute_toggle = token_bulk_page.create_ui_element(UI.Toggle, label="Microphone Mute", checked=is_muted)
+    bulk_deafen_toggle = token_bulk_page.create_ui_element(UI.Toggle, label="Audio Deafen", checked=is_deafened)
+    bulk_stream_toggle = token_bulk_page.create_ui_element(UI.Toggle, label="Screen Share (Stream)", checked=is_streaming)
+    bulk_camera_toggle = token_bulk_page.create_ui_element(UI.Toggle, label="Video Camera", checked=is_camera_on)
+    token_bulk_actions = token_bulk_page.create_group(type="columns", gap=2)
+    conn_all_btn = token_bulk_actions.create_ui_element(UI.Button, label="Join All", variant="solid", color="success")
+    apply_all_controls_btn = token_bulk_actions.create_ui_element(
+        UI.Button, label="Apply Controls", variant="solid", color="primary"
+    )
+    disc_all_btn = token_bulk_actions.create_ui_element(UI.Button, label="Leave All", variant="solid", color="danger")
+    token_pager.build()
 
     ui_refs["token_input"] = token_input
     ui_refs["token_name_input"] = token_name_input
+
+    destination_card = multi_token_setup_row.create_card(
+        type="rows", width="full", height="auto", gap=3
+    )
+    destination_card.create_ui_element(
+        UI.Text, content="Account Destination", size="lg", weight="bold"
+    )
+    destination_card.create_ui_element(
+        UI.Text,
+        content="Choose a server and voice channel for one managed account.",
+        size="sm",
+    )
+    saved_account_items = []
+    for saved_item in load_tokens().get("tokens", []):
+        if isinstance(saved_item, dict) and saved_item.get("id"):
+            saved_account_items.append({
+                "id": str(saved_item["id"]),
+                "title": str(saved_item.get("label") or saved_item.get("name") or "Managed account"),
+            })
+    if not saved_account_items:
+        saved_account_items = [{"id": "none", "title": "Add an account first"}]
+
+    destination_account_select = destination_card.create_ui_element(
+        UI.Select,
+        label="Managed Account",
+        items=saved_account_items,
+        selected_items=["none"] if saved_account_items[0]["id"] == "none" else [],
+        mode="single",
+        full_width=True,
+    )
+    destination_server_select = destination_card.create_ui_element(
+        UI.Select,
+        label="Server",
+        items=[{"id": "none", "title": "Select an account first"}],
+        selected_items=["none"],
+        mode="single",
+        full_width=True,
+        disabled=True,
+    )
+    destination_channel_select = destination_card.create_ui_element(
+        UI.Select,
+        label="Voice Channel",
+        items=[{"id": "none", "title": "Select a server first"}],
+        selected_items=["none"],
+        mode="single",
+        full_width=True,
+        disabled=True,
+    )
+    destination_actions = destination_card.create_group(type="columns", gap=2)
+    destination_join_button = destination_actions.create_ui_element(
+        UI.Button, label="Join Channel", variant="solid", color="primary", disabled=True
+    )
+    destination_refresh_button = destination_actions.create_ui_element(
+        UI.Button, label="Refresh", variant="bordered", color="default", disabled=True
+    )
+    destination_hint = destination_card.create_ui_element(
+        UI.Text,
+        content="Each account keeps its own destination and reconnects there after recoverable network drops.",
+        size="sm",
+    )
+
+    ui_refs["destination_account_select"] = destination_account_select
+    ui_refs["destination_server_select"] = destination_server_select
+    ui_refs["destination_channel_select"] = destination_channel_select
+    ui_refs["destination_join_button"] = destination_join_button
+    ui_refs["destination_refresh_button"] = destination_refresh_button
+    ui_refs["destination_hint"] = destination_hint
 
     tokens_table_card = multi_token_container.create_card(type="rows", width="full", height="auto", gap=3)
     tokens_table_card.create_ui_element(UI.Text, content="Managed Accounts", size="lg", weight="bold")
@@ -4426,6 +5343,7 @@ def vc_manager_farm_script():
                 "account_id": "-",
                 "name": "Token file error",
                 "avatar_url": "",
+                "server": "-",
                 "channel": "-",
                 "status": "Not loaded",
                 "error": data["_load_error"],
@@ -4446,16 +5364,49 @@ def vc_manager_farm_script():
             in_vc = client.is_in_vc if client else False
             status_text = "Connected" if in_vc else (getattr(client, "status", "Idle") if client else "Not loaded")
             error_text = getattr(client, "last_error", "") if client else "Nighty did not create a gateway client for this saved account. Remove it and add it again."
+            server_info = "-"
             ch_info = "-"
+            if client and client.current_guild_id:
+                current_guild_id = str(client.current_guild_id)
+                cached_guild_name = next(
+                    (
+                        guild_item.get("name")
+                        for guild_item in client.guild_cache
+                        if str(guild_item.get("id")) == current_guild_id
+                    ),
+                    None,
+                )
+                if not cached_guild_name:
+                    try:
+                        primary_guild = bot.get_guild(int(current_guild_id))
+                        cached_guild_name = getattr(primary_guild, "name", None)
+                    except (TypeError, ValueError):
+                        cached_guild_name = None
+                server_info = str(cached_guild_name or f"ID: {current_guild_id}")
             if client and client.current_channel_id:
                 channel = bot.get_channel(int(client.current_channel_id))
-                ch_info = f"#{channel.name}" if channel else f"ID: {client.current_channel_id}"
+                if channel:
+                    ch_info = f"#{channel.name}"
+                else:
+                    cached_name = next(
+                        (
+                            channel_item.get("name")
+                            for channel_items in client.channel_cache.values()
+                            for channel_item in channel_items
+                            if str(channel_item.get("id")) == str(client.current_channel_id)
+                        ),
+                        None,
+                    )
+                    ch_info = f"#{cached_name}" if cached_name else f"ID: {client.current_channel_id}"
+            elif item.get("preferred_channel_id"):
+                ch_info = "Saved destination"
 
             rows.append({
                 "id": str(tid),
                 "account_id": str(client.user_id) if (client and client.user_id) else f"{tid[:8]}...",
                 "name": name,
                 "avatar_url": getattr(client, "avatar_url", "") if client else "",
+                "server": server_info,
                 "channel": ch_info,
                 "status": status_text,
                 "error": error_text,
@@ -4566,7 +5517,150 @@ def vc_manager_farm_script():
         finally:
             _updating_dropdowns = False
 
+    def refresh_destination_account_items(preserve_selection=True):
+        nonlocal selected_token_id
+        items = []
+        for saved_item in load_tokens().get("tokens", []):
+            if isinstance(saved_item, dict) and saved_item.get("id"):
+                item_id = str(saved_item["id"])
+                select_item = {
+                    "id": item_id,
+                    "title": str(saved_item.get("label") or saved_item.get("name") or "Managed account"),
+                }
+                client = token_clients.get(item_id)
+                if client and client.avatar_url:
+                    select_item["iconUrl"] = client.avatar_url
+                items.append(select_item)
+        ui_refs["destination_account_select"].items = items or [
+            {"id": "none", "title": "Add an account first"}
+        ]
+        valid_ids = {item["id"] for item in items}
+        if preserve_selection and selected_token_id in valid_ids:
+            ui_refs["destination_account_select"].selected_items = [selected_token_id]
+        else:
+            selected_token_id = None
+            ui_refs["destination_account_select"].selected_items = ["none"] if not items else []
+            ui_refs["destination_server_select"].items = [
+                {"id": "none", "title": "Select an account first"}
+            ]
+            ui_refs["destination_server_select"].selected_items = ["none"]
+            ui_refs["destination_server_select"].disabled = True
+            ui_refs["destination_channel_select"].items = [
+                {"id": "none", "title": "Select a server first"}
+            ]
+            ui_refs["destination_channel_select"].selected_items = ["none"]
+            ui_refs["destination_channel_select"].disabled = True
+            ui_refs["destination_join_button"].disabled = True
+            ui_refs["destination_refresh_button"].disabled = not bool(items)
+
+    def get_saved_token_item(token_id):
+        for saved_item in load_tokens().get("tokens", []):
+            if isinstance(saved_item, dict) and str(saved_item.get("id") or "") == str(token_id or ""):
+                return saved_item
+        return None
+
+    async def refresh_destination_servers(force=False):
+        nonlocal selected_token_guild_id, selected_token_channel_id
+        client = token_clients.get(str(selected_token_id or ""))
+        if not client:
+            ui_refs["destination_hint"].content = "This account is not loaded. Remove it and add a fresh token."
+            return False
+        ui_refs["destination_server_select"].loading = True
+        ui_refs["destination_refresh_button"].loading = True
+        try:
+            if not await client.start_gateway():
+                ui_refs["destination_hint"].content = client.last_error or "Discord did not open this account session."
+                return False
+            guilds = await client.fetch_guilds(force=force)
+            if not guilds:
+                ui_refs["destination_server_select"].items = [
+                    {"id": "none", "title": "No accessible servers"}
+                ]
+                ui_refs["destination_server_select"].selected_items = ["none"]
+                ui_refs["destination_server_select"].disabled = True
+                ui_refs["destination_hint"].content = client.last_error or "This account has no accessible servers."
+                return False
+            server_items = []
+            for guild in guilds:
+                guild_id = str(guild["id"])
+                item = {
+                    "id": guild_id,
+                    "title": guild["name"],
+                    "iconUrl": get_gateway_guild_icon_url(guild),
+                }
+                server_items.append(item)
+            ui_refs["destination_server_select"].items = server_items
+            ui_refs["destination_server_select"].disabled = False
+            saved_item = get_saved_token_item(selected_token_id) or {}
+            preferred = str(saved_item.get("preferred_guild_id") or "")
+            valid_ids = {item["id"] for item in server_items}
+            selected_token_guild_id = preferred if preferred in valid_ids else None
+            ui_refs["destination_server_select"].selected_items = (
+                [selected_token_guild_id] if selected_token_guild_id else []
+            )
+            ui_refs["destination_refresh_button"].disabled = False
+            ui_refs["destination_hint"].content = "Select a server, then choose the voice channel for this account."
+            if selected_token_guild_id:
+                await refresh_destination_channels(selected_token_guild_id, force=force)
+            else:
+                selected_token_channel_id = None
+                ui_refs["destination_channel_select"].items = [
+                    {"id": "none", "title": "Select a server first"}
+                ]
+                ui_refs["destination_channel_select"].selected_items = ["none"]
+                ui_refs["destination_channel_select"].disabled = True
+                ui_refs["destination_join_button"].disabled = True
+            return True
+        finally:
+            ui_refs["destination_server_select"].loading = False
+            ui_refs["destination_refresh_button"].loading = False
+
+    async def refresh_destination_channels(guild_id, force=False):
+        nonlocal selected_token_guild_id, selected_token_channel_id
+        client = token_clients.get(str(selected_token_id or ""))
+        if not client:
+            return False
+        selected_token_guild_id = str(guild_id or "")
+        ui_refs["destination_channel_select"].loading = True
+        try:
+            channels = await client.fetch_voice_channels(selected_token_guild_id, force=force)
+            if not channels:
+                ui_refs["destination_channel_select"].items = [
+                    {"id": "none", "title": "No accessible voice channels"}
+                ]
+                ui_refs["destination_channel_select"].selected_items = ["none"]
+                ui_refs["destination_channel_select"].disabled = True
+                ui_refs["destination_join_button"].disabled = True
+                ui_refs["destination_hint"].content = client.last_error or "This account cannot access a voice channel in that server."
+                return False
+            channel_items = [{"id": item["id"], "title": item["name"]} for item in channels]
+            ui_refs["destination_channel_select"].items = channel_items
+            ui_refs["destination_channel_select"].disabled = False
+            saved_item = get_saved_token_item(selected_token_id) or {}
+            preferred = str(saved_item.get("preferred_channel_id") or "")
+            valid_ids = {item["id"] for item in channel_items}
+            selected_token_channel_id = preferred if preferred in valid_ids else None
+            ui_refs["destination_channel_select"].selected_items = (
+                [selected_token_channel_id] if selected_token_channel_id else []
+            )
+            ui_refs["destination_join_button"].disabled = not bool(selected_token_channel_id)
+            return True
+        finally:
+            ui_refs["destination_channel_select"].loading = False
+
     # Event handlers for UI buttons and toggles
+    def handle_bulk_mute_toggle(checked):
+        bulk_voice_state["mute"] = as_bool(checked)
+
+    def handle_bulk_deafen_toggle(checked):
+        bulk_voice_state["deaf"] = as_bool(checked)
+
+    def handle_bulk_stream_toggle(checked):
+        bulk_voice_state["stream"] = as_bool(checked)
+
+    def handle_bulk_camera_toggle(checked):
+        bulk_voice_state["video"] = as_bool(checked)
+
     async def handle_server_select(selected_items):
         nonlocal selected_server_id, selected_channel_id
         value = selected_item_id(selected_items)
@@ -4587,6 +5681,96 @@ def vc_manager_farm_script():
         if _updating_dropdowns or value in ("", "none", "loading", "error"):
             return
         selected_channel_id = value
+
+    async def handle_destination_account_select(selected_items):
+        nonlocal selected_token_id, selected_token_guild_id, selected_token_channel_id
+        token_id = selected_item_id(selected_items)
+        selected_token_id = token_id if token_id and token_id != "none" else None
+        selected_token_guild_id = None
+        selected_token_channel_id = None
+        ui_refs["destination_join_button"].disabled = True
+        ui_refs["destination_refresh_button"].disabled = not bool(selected_token_id)
+        if not selected_token_id:
+            refresh_destination_account_items(preserve_selection=False)
+            return
+        ui_refs["destination_hint"].content = "Loading servers for this account..."
+        await refresh_destination_servers(force=False)
+
+    async def handle_destination_server_select(selected_items):
+        nonlocal selected_token_guild_id, selected_token_channel_id
+        guild_id = selected_item_id(selected_items)
+        selected_token_guild_id = guild_id if guild_id and guild_id != "none" else None
+        selected_token_channel_id = None
+        ui_refs["destination_join_button"].disabled = True
+        if not selected_token_guild_id:
+            ui_refs["destination_channel_select"].items = [
+                {"id": "none", "title": "Select a server first"}
+            ]
+            ui_refs["destination_channel_select"].selected_items = ["none"]
+            ui_refs["destination_channel_select"].disabled = True
+            return
+        update_saved_token(selected_token_id, preferred_guild_id=selected_token_guild_id)
+        await refresh_destination_channels(selected_token_guild_id, force=False)
+
+    async def handle_destination_channel_select(selected_items):
+        nonlocal selected_token_channel_id
+        channel_id = selected_item_id(selected_items)
+        selected_token_channel_id = channel_id if channel_id and channel_id != "none" else None
+        ui_refs["destination_join_button"].disabled = not bool(selected_token_channel_id)
+        if selected_token_channel_id:
+            destination_saved = update_saved_token(
+                selected_token_id,
+                preferred_guild_id=selected_token_guild_id,
+                preferred_channel_id=selected_token_channel_id,
+            )
+            ui_refs["destination_hint"].content = (
+                "Destination saved. Join Channel connects only this managed account."
+                if destination_saved
+                else "Nighty could not save this destination. Check the scripts JSON folder permissions."
+            )
+
+    async def handle_destination_refresh():
+        if not selected_token_id:
+            tab.toast("Account required", "Select a managed account first.", "ERROR")
+            return
+        await refresh_destination_servers(force=True)
+
+    async def handle_destination_join():
+        client = token_clients.get(str(selected_token_id or ""))
+        if not client:
+            tab.toast("Account unavailable", "Select a loaded managed account.", "ERROR")
+            return
+        if not selected_token_guild_id or not selected_token_channel_id:
+            tab.toast("Destination required", "Select a server and voice channel for this account.", "ERROR")
+            return
+        ui_refs["destination_join_button"].loading = True
+        try:
+            joined = await client.join_vc(
+                selected_token_guild_id,
+                selected_token_channel_id,
+                mute=is_muted,
+                deaf=is_deafened,
+                stream=is_streaming,
+                video=is_camera_on,
+            )
+            update_token_table_rows()
+            if joined:
+                channel_name = next(
+                    (
+                        item.get("name")
+                        for item in client.channel_cache.get(str(selected_token_guild_id), [])
+                        if str(item.get("id")) == str(selected_token_channel_id)
+                    ),
+                    selected_token_channel_id,
+                )
+                if client.last_error:
+                    tab.toast("Account connected, destination not saved", client.last_error, "ERROR")
+                else:
+                    tab.toast("Account connected", f"{client.name} joined #{channel_name}.", "SUCCESS")
+            else:
+                tab.toast("Account could not join", client.last_error or "Discord did not confirm the voice join.", "ERROR")
+        finally:
+            ui_refs["destination_join_button"].loading = False
 
     async def handle_join():
         join_button.loading = True
@@ -4799,7 +5983,7 @@ def vc_manager_farm_script():
 
     def handle_open_history():
         data = load_data()
-        sessions = data.get("sessions", [])
+        sessions = get_primary_session_history(include_live=True)
         live_seconds = (
             (datetime.now() - connection_start_time).total_seconds()
             if connection_start_time and is_actually_connected() else 0
@@ -4880,12 +6064,19 @@ def vc_manager_farm_script():
                 tab.toast("Account already added", "Managed Accounts already contains this token.", "ERROR")
                 return
             new_id = str(uuid.uuid4())
-            data["tokens"].append({"id": new_id, "token": tok, "name": name})
+            data["tokens"].append({
+                "id": new_id,
+                "token": tok,
+                "name": name,
+                "preferred_guild_id": "",
+                "preferred_channel_id": "",
+                "stay_connected": False,
+            })
             if not save_tokens(data):
                 tab.toast("Could not save account", f"Nighty could not write {TOKENS_DATA_PATH.name}. Check folder permissions and free disk space.", "ERROR")
                 return
 
-            client = GatewayVoiceClient(tok, name=name)
+            client = GatewayVoiceClient(tok, name=name, record_id=new_id)
             token_clients[new_id] = client
             started = await client.start_gateway()
             if started:
@@ -4903,6 +6094,7 @@ def vc_manager_farm_script():
 
             ui_refs["token_input"].value = ""
             ui_refs["token_name_input"].value = ""
+            refresh_destination_account_items(preserve_selection=True)
             update_token_table_rows()
             if client.user_id:
                 tab.toast("Account added", f"{name} signed in and can join voice channels.", "SUCCESS")
@@ -4914,7 +6106,7 @@ def vc_manager_farm_script():
                 )
         except Exception as e:
             print(f"[VC Manager] Could not add managed account: {e}", type_="ERROR")
-            tab.toast("Account error", "Nighty hit an internal error. Open the console for details.", "ERROR")
+            tab.toast("Account could not be added", f"VC Manager stopped before the account was ready: {type(e).__name__}. Check the Nighty console for the full error.", "ERROR")
         finally:
             add_token_btn.loading = False
 
@@ -4922,43 +6114,55 @@ def vc_manager_farm_script():
         conn_all_btn.loading = True
         try:
             cur = get_current_voice_channel()
-            if not cur:
-                tab.toast("Main account is not connected", "Join a voice channel with VC Manager, then press Join All again.", "ERROR")
-                return
-
-            clients = list(token_clients.values())
+            clients = list(token_clients.items())
             if not clients:
                 tab.toast("No managed accounts", "Add at least one account before pressing Join All.", "ERROR")
                 return
 
-            results = await asyncio.gather(
-                *(
-                    client.join_vc(
-                        cur.guild.id,
-                        cur.id,
-                        mute=is_muted,
-                        deaf=is_deafened,
-                        stream=is_streaming,
-                        video=is_camera_on,
-                    )
-                    for client in clients
-                ),
-                return_exceptions=True
-            )
-            connected = 0
+            join_jobs = []
+            join_clients = []
             failures = []
-            for client, result in zip(clients, results):
+            for token_id, client in clients:
+                saved_item = get_saved_token_item(token_id) or {}
+                guild_id = str(saved_item.get("preferred_guild_id") or "")
+                channel_id = str(saved_item.get("preferred_channel_id") or "")
+                if not guild_id or not channel_id:
+                    if cur:
+                        guild_id = str(cur.guild.id)
+                        channel_id = str(cur.id)
+                    else:
+                        failures.append((client.name, "Choose this account's server and voice channel in Account Destination."))
+                        continue
+                join_clients.append(client)
+                join_jobs.append(client.join_vc(
+                    guild_id,
+                    channel_id,
+                    mute=bulk_voice_state["mute"],
+                    deaf=bulk_voice_state["deaf"],
+                    stream=bulk_voice_state["stream"],
+                    video=bulk_voice_state["video"],
+                ))
+
+            results = await asyncio.gather(*join_jobs, return_exceptions=True) if join_jobs else []
+            connected = 0
+            save_warnings = []
+            for client, result in zip(join_clients, results):
                 if result is True:
                     connected += 1
+                    if client.last_error:
+                        save_warnings.append((client.name, client.last_error))
                     continue
                 if isinstance(result, Exception):
                     print(f"[VC Manager] Join All failed for {client.name}: {result}", type_="ERROR")
-                    client._set_status("Join failed", "Nighty hit an internal error for this account. Open the console for details.")
+                    client._set_status("Join failed", f"VC Manager stopped while joining this account: {type(result).__name__}. Check the Nighty console for the full error.")
                 failures.append((client.name, client.last_error or "Discord did not confirm the voice join."))
 
             update_token_table_rows()
-            if connected == len(clients):
-                tab.toast("Accounts connected", f"All {connected} managed accounts joined #{cur.name}.", "SUCCESS")
+            if connected == len(clients) and save_warnings:
+                warning_name, warning_text = save_warnings[0]
+                tab.toast("Accounts connected, destination not saved", f"{warning_name}: {warning_text}", "ERROR")
+            elif connected == len(clients):
+                tab.toast("Accounts connected", f"All {connected} managed accounts joined their saved destinations.", "SUCCESS")
             else:
                 first_name, first_error = failures[0]
                 remaining = len(failures) - 1
@@ -4977,9 +6181,49 @@ def vc_manager_farm_script():
                     )
         except Exception as e:
             print(f"[VC Manager] Join All stopped: {e}", type_="ERROR")
-            tab.toast("Join All error", "Nighty hit an internal error. Open the console for details.", "ERROR")
+            tab.toast("Join All stopped", f"VC Manager could not finish the request: {type(e).__name__}. No saved accounts were removed.", "ERROR")
         finally:
             conn_all_btn.loading = False
+
+    async def handle_apply_all_controls():
+        apply_all_controls_btn.loading = True
+        try:
+            connected_clients = [client for client in token_clients.values() if client.is_in_vc]
+            if not connected_clients:
+                tab.toast("No connected accounts", "Join at least one managed account before applying controls.", "ERROR")
+                return
+            requested = dict(bulk_voice_state)
+            results = await asyncio.gather(
+                *(client.set_voice_controls(**requested) for client in connected_clients),
+                return_exceptions=True,
+            )
+            updated = sum(result is True for result in results)
+            update_token_table_rows()
+            if updated == len(connected_clients):
+                tab.toast("Controls applied", f"Updated {updated} connected account{'s' if updated != 1 else ''}.", "SUCCESS")
+            else:
+                failed_client = next(
+                    (
+                        client for client, result in zip(connected_clients, results)
+                        if result is not True
+                    ),
+                    None,
+                )
+                failure_text = (
+                    failed_client.last_error
+                    if failed_client and failed_client.last_error
+                    else "Discord rejected one or more voice-control updates."
+                )
+                tab.toast(
+                    "Some controls were not applied",
+                    f"Updated {updated} of {len(connected_clients)} accounts. {failure_text}",
+                    "ERROR",
+                )
+        except Exception as error:
+            print(f"[VC Manager] Apply Controls stopped: {error}", type_="ERROR")
+            tab.toast("Apply Controls stopped", f"VC Manager could not finish the request: {type(error).__name__}.", "ERROR")
+        finally:
+            apply_all_controls_btn.loading = False
 
     async def handle_disc_all_tokens():
         disc_all_btn.loading = True
@@ -5001,9 +6245,59 @@ def vc_manager_farm_script():
                 tab.toast("Some accounts stayed connected", f"Disconnected {count} of {len(connected_clients)} accounts. Check Managed Accounts for errors.", "ERROR")
         except Exception as e:
             print(f"[VC Manager] Leave All stopped: {e}", type_="ERROR")
-            tab.toast("Leave All error", "Nighty hit an internal error. Open the console for details.", "ERROR")
+            tab.toast("Leave All stopped", f"VC Manager could not finish the request: {type(e).__name__}. Check Managed Accounts to see which accounts are still connected.", "ERROR")
         finally:
             disc_all_btn.loading = False
+
+    def handle_token_history(row_id):
+        row_id_str = str(row_id or "")
+        saved_item = get_saved_token_item(row_id_str) or {}
+        client = token_clients.get(row_id_str)
+        sessions = [
+            dict(session) for session in saved_item.get("sessions", [])
+            if isinstance(session, dict)
+        ]
+        try:
+            total_seconds = max(0.0, float(saved_item.get("total_vc_time_seconds", 0) or 0))
+        except (TypeError, ValueError):
+            total_seconds = 0.0
+        if client and client.voice_session_started_at:
+            live_seconds = max(0.0, (datetime.now() - client.voice_session_started_at).total_seconds())
+            guild_name, channel_name = client._voice_target_names(
+                client.voice_session_guild_id,
+                client.voice_session_channel_id,
+            )
+            sessions.append({
+                "guild_id": client.voice_session_guild_id,
+                "guild_name": guild_name,
+                "channel_id": client.voice_session_channel_id,
+                "channel_name": channel_name,
+                "start_time": client.voice_session_started_at.isoformat(),
+                "duration_seconds": live_seconds,
+                "reason": "Active",
+            })
+            total_seconds += live_seconds
+
+        account_name = str(
+            (client.name if client else None)
+            or saved_item.get("label")
+            or saved_item.get("name")
+            or "Managed Account"
+        )
+
+        def clear_token_sessions():
+            if update_saved_token(row_id_str, sessions=[], total_vc_time_seconds=0.0):
+                tab.toast("Session logs cleared", f"Cleared saved sessions for {account_name}.", "SUCCESS")
+            else:
+                tab.toast("Could not clear logs", "Nighty could not update the managed-account data file.", "ERROR")
+
+        tab.sessionhistorymodal(
+            title=f"{html_escape(account_name)} Sessions",
+            sessions_json=json.dumps(json.dumps(sessions, ensure_ascii=False)),
+            total_vc_time=format_duration(total_seconds),
+            onClear=clear_token_sessions,
+            onClose=lambda: None,
+        )
 
     def handle_token_action(payload):
         try:
@@ -5016,13 +6310,16 @@ def vc_manager_farm_script():
         row_id = str(action_data.get("id") or "")
         action = str(action_data.get("action") or "account").lower()
         if action == "account":
-            handle_token_leave(row_id)
+            handle_token_connection(row_id, "connection")
             return
         if action in {"join", "leave", "connection"}:
             handle_token_connection(row_id, action)
             return
         if action == "remove":
             handle_token_remove(row_id)
+            return
+        if action == "logs":
+            handle_token_history(row_id)
             return
 
         control_map = {
@@ -5109,18 +6406,24 @@ def vc_manager_farm_script():
                 update_token_table_rows()
                 return
 
+            saved_item = get_saved_token_item(row_id_str) or {}
+            target_guild_id = str(saved_item.get("preferred_guild_id") or "")
+            target_channel_id = str(saved_item.get("preferred_channel_id") or "")
             current = get_current_voice_channel()
-            if not current:
+            if (not target_guild_id or not target_channel_id) and current:
+                target_guild_id = str(current.guild.id)
+                target_channel_id = str(current.id)
+            if not target_guild_id or not target_channel_id:
                 tab.toast(
-                    "Main account is not connected",
-                    "Join a voice channel with VC Manager before joining this account.",
+                    "Destination required",
+                    "Choose this account's server and voice channel in Account Destination.",
                     "ERROR",
                 )
                 return
 
             joined = await client.join_vc(
-                current.guild.id,
-                current.id,
+                target_guild_id,
+                target_channel_id,
                 mute=is_muted,
                 deaf=is_deafened,
                 stream=is_streaming,
@@ -5128,11 +6431,19 @@ def vc_manager_farm_script():
             )
             update_token_table_rows()
             if joined:
-                tab.toast(
-                    "Account connected",
-                    f"{client.name} joined #{current.name} with the current voice controls.",
-                    "SUCCESS",
-                )
+                channel_name = target_channel_id
+                for channel_item in client.channel_cache.get(target_guild_id, []):
+                    if str(channel_item.get("id")) == target_channel_id:
+                        channel_name = channel_item.get("name") or target_channel_id
+                        break
+                if client.last_error:
+                    tab.toast("Account connected, destination not saved", client.last_error, "ERROR")
+                else:
+                    tab.toast(
+                        "Account connected",
+                        f"{client.name} joined #{channel_name} with the current voice controls.",
+                        "SUCCESS",
+                    )
             else:
                 tab.toast(
                     "Account could not join",
@@ -5164,49 +6475,23 @@ def vc_manager_farm_script():
             client = token_clients.pop(row_id_str, None)
             if client:
                 await client.close()
+            refresh_destination_account_items(preserve_selection=True)
             update_token_table_rows()
             tab.toast("Account removed", "VC Manager removed the saved token.", "SUCCESS")
 
         safe_create_task(remove_token())
 
     def handle_token_leave(row_id):
-        row_id_str = str(row_id)
-        async def manage_token():
-            client = token_clients.get(row_id_str)
-            if client and client.is_in_vc:
-                if await client.leave_vc():
-                    tab.toast("Account disconnected", "Managed Accounts still contains this account.", "SUCCESS")
-                else:
-                    tab.toast("Disconnect failed", client.last_error or "Discord did not accept the leave request.", "ERROR")
-                update_token_table_rows()
-                return
-
-            data = load_tokens()
-            if data.get("_load_error"):
-                tab.toast("Token file is broken", data["_load_error"], "ERROR")
-                return
-            original_count = len(data.get("tokens", []))
-            data["tokens"] = [
-                item for item in data.get("tokens", [])
-                if not isinstance(item, dict) or str(item.get("id") or "") != row_id_str
-            ]
-            if len(data["tokens"]) == original_count:
-                tab.toast("Account not found", "Refresh Managed Accounts and try again.", "ERROR")
-                return
-            if not save_tokens(data):
-                tab.toast("Could not remove account", "Nighty could not update the token file.", "ERROR")
-                return
-            client = token_clients.pop(row_id_str, None)
-            if client:
-                await client.close()
-            update_token_table_rows()
-            tab.toast("Account removed", "VC Manager removed the saved token.", "SUCCESS")
-
-        safe_create_task(manage_token())
+        handle_token_connection(str(row_id), "leave")
 
     # Wire all callbacks
     server_select.onChange = handle_server_select
     channel_select.onChange = handle_channel_select
+    destination_account_select.onChange = handle_destination_account_select
+    destination_server_select.onChange = handle_destination_server_select
+    destination_channel_select.onChange = handle_destination_channel_select
+    destination_join_button.onClick = handle_destination_join
+    destination_refresh_button.onClick = handle_destination_refresh
     join_button.onClick = handle_join
     leave_button.onClick = handle_leave
     refresh_list_button.onClick = handle_refresh_list
@@ -5227,7 +6512,12 @@ def vc_manager_farm_script():
     set_channel_status_btn.onClick = handle_set_channel_status
     clear_channel_status_btn.onClick = handle_clear_channel_status
     add_token_btn.onClick = handle_add_token
+    bulk_mute_toggle.onChange = handle_bulk_mute_toggle
+    bulk_deafen_toggle.onChange = handle_bulk_deafen_toggle
+    bulk_stream_toggle.onChange = handle_bulk_stream_toggle
+    bulk_camera_toggle.onChange = handle_bulk_camera_toggle
     conn_all_btn.onClick = handle_conn_all_tokens
+    apply_all_controls_btn.onClick = handle_apply_all_controls
     disc_all_btn.onClick = handle_disc_all_tokens
 
     # ==================== STARTUP SEQUENCE ====================
@@ -5251,6 +6541,16 @@ def vc_manager_farm_script():
     deafen_toggle.checked = is_deafened
     stream_toggle.checked = is_streaming
     camera_toggle.checked = is_camera_on
+    bulk_mute_toggle.checked = is_muted
+    bulk_deafen_toggle.checked = is_deafened
+    bulk_stream_toggle.checked = is_streaming
+    bulk_camera_toggle.checked = is_camera_on
+    bulk_voice_state.update({
+        "mute": is_muted,
+        "deaf": is_deafened,
+        "stream": is_streaming,
+        "video": is_camera_on,
+    })
     reconnect_toggle.checked = is_auto_reconnect
     leave_alone_toggle.checked = is_leave_when_alone
     follow_toggle.checked = is_auto_follow
@@ -5266,6 +6566,46 @@ def vc_manager_farm_script():
     update_token_table_rows()
 
     # 3. Fast server & channel pre-population
+    def version_tuple(value):
+        parts = [int(part) for part in re.findall(r"\d+", str(value or ""))[:3]]
+        return tuple((parts + [0, 0, 0])[:3])
+
+    async def check_for_script_update():
+        await asyncio.sleep(1.0)
+        timeout = aiohttp.ClientTimeout(total=12)
+        headers = {"User-Agent": f"Nighty-VC-Manager/{SCRIPT_VERSION}"}
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(VERSION_SOURCE_URL) as response:
+                    if response.status != 200:
+                        print(
+                            f"[VC Manager] Update check returned HTTP {response.status}. The script will keep running.",
+                            type_="INFO",
+                        )
+                        return
+                    source = await response.text()
+            match = re.search(r'^\s*SCRIPT_VERSION\s*=\s*["\']([^"\']+)["\']', source, re.MULTILINE)
+            if not match:
+                match = re.search(r'name\s*=\s*["\']VC Manager v([^"\']+)["\']', source)
+            if not match:
+                print("[VC Manager] The update check could not read the repository version.", type_="INFO")
+                return
+            latest_version = match.group(1).strip()
+            if version_tuple(latest_version) <= version_tuple(SCRIPT_VERSION):
+                return
+            tab.updateavailablemodal(
+                current_version=SCRIPT_VERSION,
+                latest_version=latest_version,
+                project_url=PROJECT_URL,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(
+                f"[VC Manager] Update check failed: {type(error).__name__}: {error}. The script will keep running.",
+                type_="INFO",
+            )
+
     async def startup_sync():
         await asyncio.sleep(0.02)
     # Paint the primary connection and participants before secondary gateways
@@ -5282,6 +6622,7 @@ def vc_manager_farm_script():
                 if isinstance(result, Exception):
                     print(f"[VC Manager] Could not start {client.name}: {result}", type_="ERROR")
             update_token_table_rows()
+        refresh_destination_account_items(preserve_selection=True)
     async def live_timer_ticker():
         tick_count = 0
         while True:
@@ -5357,6 +6698,7 @@ def vc_manager_farm_script():
     bot_is_ready = getattr(bot, "is_ready", None)
     if not callable(bot_is_ready) or bot_is_ready():
         safe_create_task(startup_sync())
+    runtime_state["update_check_task"] = safe_create_task(check_for_script_update())
     ensure_live_timer()
 
 vc_manager_farm_script()
