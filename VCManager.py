@@ -3,7 +3,7 @@
 # Voice controls, session data, and multi-token account management for Nighty
 
 @nightyScript(
-    name="VC Manager v4.3.0",
+    name="VC Manager v4.3.1",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
     usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
@@ -78,7 +78,7 @@ def vc_manager_farm_script():
 
     import aiohttp
 
-    SCRIPT_VERSION = "4.3.0"
+    SCRIPT_VERSION = "4.3.1"
     PROJECT_URL = "https://github.com/aboveproof/Nighty-VC-Manager"
     VERSION_SOURCE_URL = (
         "https://raw.githubusercontent.com/aboveproof/Nighty-VC-Manager/main/VCManager.py"
