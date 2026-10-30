@@ -992,7 +992,7 @@ def vc_manager_farm_script():
                 (function() {
                     if (
                         window.CUI_Pager &&
-                        window.CUI_Pager.version === 'vc-manager-pager-v2' &&
+                        window.CUI_Pager.version === 'vc-manager-pager-v3' &&
                         window.CUI_Pager.observer
                     ) {
                         window.CUI_Pager.initPagers();
@@ -1022,11 +1022,86 @@ def vc_manager_farm_script():
                             pointer-events: none;
                             box-sizing: border-box;
                         }
+                        .cui-pager-controls {
+                            position: absolute !important;
+                            top: 16px !important;
+                            right: 16px !important;
+                            z-index: 10 !important;
+                            display: inline-flex !important;
+                            flex-direction: row !important;
+                            flex-wrap: nowrap !important;
+                            align-items: center !important;
+                            justify-content: center !important;
+                            gap: 6px !important;
+                            width: auto !important;
+                            min-width: 0 !important;
+                            max-width: calc(100% - 32px) !important;
+                            height: 36px !important;
+                            margin: 0 !important;
+                            padding: 3px 7px !important;
+                            box-sizing: border-box !important;
+                            white-space: nowrap !important;
+                        }
+                        .cui-pager-controls > span {
+                            display: inline-block !important;
+                            width: auto !important;
+                            min-width: 38px !important;
+                            flex: 0 0 auto !important;
+                            line-height: 1 !important;
+                            white-space: nowrap !important;
+                        }
+                        .cui-pager-controls > button {
+                            display: inline-flex !important;
+                            align-items: center !important;
+                            justify-content: center !important;
+                            flex: 0 0 24px !important;
+                            width: 24px !important;
+                            min-width: 24px !important;
+                            max-width: 24px !important;
+                            height: 28px !important;
+                            min-height: 28px !important;
+                            max-height: 28px !important;
+                            margin: 0 !important;
+                            padding: 0 !important;
+                        }
+                        @media (max-width: 640px) {
+                            .cui-pager-controls {
+                                top: 14px !important;
+                                right: 12px !important;
+                                gap: 3px !important;
+                                height: 32px !important;
+                                padding: 2px 5px !important;
+                                max-width: calc(100% - 24px) !important;
+                            }
+                            .cui-pager-controls > span {
+                                min-width: 34px !important;
+                                font-size: 12px !important;
+                            }
+                            .cui-pager-controls > button {
+                                flex-basis: 22px !important;
+                                width: 22px !important;
+                                min-width: 22px !important;
+                                max-width: 22px !important;
+                                height: 26px !important;
+                                min-height: 26px !important;
+                                max-height: 26px !important;
+                                font-size: 20px !important;
+                            }
+                        }
                     `;
                     document.head.appendChild(style);
 
+                    // Keep pagers that were already rendered by an older
+                    // script generation, and apply the compact mobile layout.
+                    document.querySelectorAll('.cui-pager-wrapper').forEach(wrapper => {
+                        const counter = document.getElementById(`${wrapper.id}-counter`);
+                        if (counter && counter.parentElement) {
+                            counter.parentElement.classList.add('cui-pager-controls');
+                        }
+                    });
+
                     window.CUI_Pager = {
-                        version: 'vc-manager-pager-v2',
+                        version: 'vc-manager-pager-v3',
                         initPagers: function() {
                             const allMarkers = document.querySelectorAll('.cui-page-marker');
                             const pagersToInit = new Map();
@@ -1142,7 +1217,7 @@ def vc_manager_farm_script():
                             const mouseOutEffect = "this.style.opacity='0.75'";
 
                             const newControlsHtml = `
-                                <div style="position: absolute; top: 16px; right: 16px; display: flex; align-items: center; gap: 8px; background-color: rgba(30, 30, 30, 0.7); backdrop-filter: blur(4px); padding: 4px 8px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1); z-index: 10;">
+                                <div class="cui-pager-controls" style="background-color: rgba(30, 30, 30, 0.7); backdrop-filter: blur(4px); border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1);">
                                     <span id="${pagerId}-counter" style="font-family: monospace; font-size: 14px;"></span>
                                     <button id="${pagerId}-prev" onclick="CUI_Pager.goToPage('${pagerId}', -1, true)" style="${btnStyle}" onmouseover="${hoverEffect}" onmouseout="${mouseOutEffect}">&lsaquo;</button>
                                     <button id="${pagerId}-next" onclick="CUI_Pager.goToPage('${pagerId}', 1, true)" style="${btnStyle}" onmouseover="${hoverEffect}" onmouseout="${mouseOutEffect}">&rsaquo;</button>
@@ -1230,7 +1305,7 @@ def vc_manager_farm_script():
 
     VC_UI_JS = """
     (function() {
-        const uiVersion = 'vc-manager-ui-v4';
+        const uiVersion = 'vc-manager-ui-v5';
         if (
             window.VCManagerUIVersion === uiVersion &&
             (window.VCManagerLayoutObserver || window.VCManagerLayoutTimer)
@@ -1713,6 +1788,69 @@ def vc_manager_farm_script():
             });
         };
 
+        window.wireVCManagerTokenForm = function() {
+            if (
+                window.VCManagerTokenFormClickHandler &&
+                window.VCManagerTokenFormClickHandler.vcVersion === 'v2'
+            ) return;
+            if (window.VCManagerTokenFormClickHandler) {
+                document.removeEventListener('click', window.VCManagerTokenFormClickHandler, true);
+            }
+
+            const dispatchInputEvent = function(input, eventName) {
+                let event;
+                try {
+                    event = new Event(eventName, { bubbles: true, cancelable: false, composed: true });
+                } catch (error) {
+                    event = document.createEvent('Event');
+                    event.initEvent(eventName, true, false);
+                }
+                input.dispatchEvent(event);
+            };
+
+            const clickHandler = function(event) {
+                const target = event.target && event.target.closest
+                    ? event.target.closest('button')
+                    : null;
+                if (!target || target.textContent.trim() !== 'Add Account') return;
+                const card = target.closest('.card') || target.parentElement;
+                if (!card || !Array.from(card.querySelectorAll('*')).some(element =>
+                    element.childElementCount === 0 && element.textContent.trim() === 'Multi-Token Accounts'
+                )) return;
+
+                const addButton = target;
+                if (addButton.dataset.vcTokenFormReplay === 'true') {
+                    delete addButton.dataset.vcTokenFormReplay;
+                    return;
+                }
+
+                const inputs = Array.from(card.querySelectorAll('input')).slice(0, 2);
+                if (inputs.length === 0) return;
+
+                // Mobile browsers can deliver the button click before the final
+                // controlled-input update. Send input/change first, then replay
+                // the click after Nighty's callback queue has received them.
+                event.preventDefault();
+                event.stopPropagation();
+                if (typeof event.stopImmediatePropagation === 'function') {
+                    event.stopImmediatePropagation();
+                }
+                inputs.forEach(input => {
+                    dispatchInputEvent(input, 'input');
+                    dispatchInputEvent(input, 'change');
+                });
+                addButton.dataset.vcTokenFormReplay = 'true';
+                setTimeout(function() {
+                    if (addButton.isConnected && !addButton.disabled) addButton.click();
+                    else delete addButton.dataset.vcTokenFormReplay;
+                }, 120);
+            };
+            clickHandler.vcVersion = 'v2';
+            window.VCManagerTokenFormClickHandler = clickHandler;
+            document.addEventListener('click', clickHandler, true);
+        };
+        window.wireVCManagerTokenForm();
+
         window.sizeVCParticipantCard = function() {
             const findCard = prefix => {
                 const title = Array.from(document.querySelectorAll('*')).find(element =>
@@ -1798,6 +1936,7 @@ def vc_manager_farm_script():
             window.sizeVCParticipantCard();
             window.sizeVCManagedAccountsCard();
             window.sizeVCAccountSetupCards();
+            window.wireVCManagerTokenForm();
             document.querySelectorAll('.vc-managed-accounts-pager').forEach(root => {
                 if (root.dataset.managedPagerReady !== 'true') {
                     window.VCManagedAccountsPager.render(root.id);
@@ -1805,15 +1944,33 @@ def vc_manager_farm_script():
             });
         };
 
+        window.VCManagerScheduleLayout = function() {
+            if (window.VCManagerLayoutPending) return;
+            window.VCManagerLayoutPending = true;
+            let finished = false;
+            const run = function() {
+                if (finished) return;
+                finished = true;
+                window.VCManagerLayoutPending = false;
+                window.VCManagerRefreshLayout();
+            };
+            if (typeof window.requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') {
+                window.requestAnimationFrame(run);
+                setTimeout(run, 160);
+            } else {
+                setTimeout(run, 0);
+            }
+        };
+
         if (window.VCManagerLayoutObserver && typeof window.VCManagerLayoutObserver.disconnect === 'function') {
             window.VCManagerLayoutObserver.disconnect();
         }
         if (window.VCManagerLayoutTimer) clearInterval(window.VCManagerLayoutTimer);
         if (typeof MutationObserver === 'function' && (document.documentElement || document.body)) {
-            window.VCManagerLayoutObserver = new MutationObserver(window.VCManagerRefreshLayout);
+            window.VCManagerLayoutObserver = new MutationObserver(window.VCManagerScheduleLayout);
             window.VCManagerLayoutObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
         } else {
-            window.VCManagerLayoutTimer = setInterval(window.VCManagerRefreshLayout, 1000);
+            window.VCManagerLayoutTimer = setInterval(window.VCManagerScheduleLayout, 1000);
         }
 
         setTimeout(() => {
@@ -1822,6 +1979,7 @@ def vc_manager_farm_script():
             window.sizeVCParticipantCard();
             window.sizeVCManagedAccountsCard();
             window.sizeVCAccountSetupCards();
+            window.wireVCManagerTokenForm();
             Object.keys(window.VCParticipantPager.states).forEach(pagerId =>
                 window.VCParticipantPager.render(pagerId)
             );
@@ -1832,9 +1990,7 @@ def vc_manager_farm_script():
 
         if (window.VCManagerResizeHandler) window.removeEventListener('resize', window.VCManagerResizeHandler);
         window.VCManagerResizeHandler = () => {
-            window.sizeVCParticipantCard();
-            window.sizeVCManagedAccountsCard();
-            window.sizeVCAccountSetupCards();
+            window.VCManagerScheduleLayout();
         };
         window.addEventListener('resize', window.VCManagerResizeHandler);
     })();
@@ -2317,6 +2473,7 @@ def vc_manager_farm_script():
     selected_token_channel_id = None
     _updating_dropdowns = False
     ui_refs = {}
+    token_form_state = {"token": "", "name": ""}
     status_editor_channel_id = None
     # VC Manager owns connections opened through this script. Ignore Nighty's
     # separate voice session.
@@ -6173,11 +6330,29 @@ def vc_manager_farm_script():
     async def handle_clear_channel_status():
         await apply_channel_status("", clear=True)
 
+    def form_input_text(value):
+        if isinstance(value, dict):
+            value = value.get("value", "")
+        elif isinstance(value, (list, tuple)):
+            value = value[0] if value else ""
+        return str(value or "")
+
+    def handle_token_input(value):
+        token_form_state["token"] = form_input_text(value)
+
+    def handle_token_name_input(value):
+        token_form_state["name"] = form_input_text(value)
+
     async def handle_add_token():
         add_token_btn.loading = True
         try:
-            tok = (ui_refs["token_input"].value or "").strip().strip('"').strip("'").strip()
-            name = (ui_refs["token_name_input"].value or "").strip() or f"Token #{len(token_clients)+1}"
+            # Yield once so mobile input callbacks queued immediately before the
+            # tap can update token_form_state before this handler reads it.
+            await asyncio.sleep(0.12)
+            token_value = token_form_state.get("token") or form_input_text(ui_refs["token_input"].value)
+            name_value = token_form_state.get("name") or form_input_text(ui_refs["token_name_input"].value)
+            tok = token_value.strip().strip('"').strip("'").strip()
+            name = name_value.strip() or f"Token #{len(token_clients)+1}"
 
             if not tok:
                 tab.toast("Token missing", "Paste the account token before pressing Add Account.", "ERROR")
@@ -6224,6 +6399,8 @@ def vc_manager_farm_script():
 
             ui_refs["token_input"].value = ""
             ui_refs["token_name_input"].value = ""
+            token_form_state["token"] = ""
+            token_form_state["name"] = ""
             refresh_destination_account_items(preserve_selection=True)
             update_token_table_rows()
             if client.user_id:
@@ -6669,6 +6846,8 @@ def vc_manager_farm_script():
     leave_alone_toggle.onChange = handle_leave_alone_toggle
     follow_toggle.onChange = handle_follow_toggle
     follow_target_input.onInput = handle_follow_target_input
+    token_input.onInput = handle_token_input
+    token_name_input.onInput = handle_token_name_input
     apply_timer_btn.onClick = handle_apply_timer
     command_ephemeral_toggle.onChange = handle_command_ephemeral_toggle
     command_theme_toggle.onChange = handle_command_theme_toggle
@@ -6836,6 +7015,7 @@ def vc_manager_farm_script():
             for delay in (0.10, 0.35, 0.75, 1.50, 3.00):
                 await asyncio.sleep(delay)
                 reeval()
+                evaluate_js(VC_UI_JS)
 
         runtime_state["ui_restore_task"] = safe_create_task(restore_after_render())
         return runtime_state["ui_restore_task"]
@@ -6848,6 +7028,7 @@ def vc_manager_farm_script():
     def vc_manager_ui_connect():
         """Publish the current UI tree after the private tab reconnects."""
         tab.render()
+        evaluate_js(VC_UI_JS)
         update_all_ui()
         schedule_browser_ui_restore()
 
