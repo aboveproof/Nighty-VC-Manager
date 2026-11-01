@@ -74,7 +74,7 @@ def vc_manager_farm_script():
     from html import escape as html_escape
     from pathlib import Path
     from typing import Literal
-    from urllib.parse import quote
+    from urllib.parse import quote, urlparse
 
     import aiohttp
 
@@ -168,7 +168,7 @@ def vc_manager_farm_script():
     # this load creates new work, then queue cancellation on the bot loop.
     legacy_task_names = {
         "live_timer_ticker", "startup_sync", "timer", "reconnect_later",
-        "_gateway_loop", "_heartbeat"
+        "_gateway_loop", "_heartbeat", "gateway_watchdog"
     }
     try:
         bot_loop = getattr(bot, "loop", None)
@@ -1305,7 +1305,7 @@ def vc_manager_farm_script():
 
     VC_UI_JS = """
     (function() {
-        const uiVersion = 'vc-manager-ui-v5';
+        const uiVersion = 'vc-manager-ui-v6';
         if (
             window.VCManagerUIVersion === uiVersion &&
             (window.VCManagerLayoutObserver || window.VCManagerLayoutTimer)
@@ -1791,7 +1791,7 @@ def vc_manager_farm_script():
         window.wireVCManagerTokenForm = function() {
             if (
                 window.VCManagerTokenFormClickHandler &&
-                window.VCManagerTokenFormClickHandler.vcVersion === 'v2'
+                window.VCManagerTokenFormClickHandler.vcVersion === 'v3'
             ) return;
             if (window.VCManagerTokenFormClickHandler) {
                 document.removeEventListener('click', window.VCManagerTokenFormClickHandler, true);
@@ -1813,10 +1813,21 @@ def vc_manager_farm_script():
                     ? event.target.closest('button')
                     : null;
                 if (!target || target.textContent.trim() !== 'Add Account') return;
-                const card = target.closest('.card') || target.parentElement;
-                if (!card || !Array.from(card.querySelectorAll('*')).some(element =>
-                    element.childElementCount === 0 && element.textContent.trim() === 'Multi-Token Accounts'
-                )) return;
+                const isTokenCard = function(element) {
+                    if (!element || !element.querySelectorAll) return false;
+                    const hasTitle = Array.from(element.querySelectorAll('*')).some(child =>
+                        child.childElementCount === 0 && child.textContent.trim() === 'Multi-Token Accounts'
+                    );
+                    return hasTitle && element.querySelectorAll('input').length >= 2;
+                };
+                let card = target.closest('.card');
+                if (!isTokenCard(card)) {
+                    card = target.parentElement;
+                    while (card && card !== document.body && !isTokenCard(card)) {
+                        card = card.parentElement;
+                    }
+                }
+                if (!isTokenCard(card)) return;
 
                 const addButton = target;
                 if (addButton.dataset.vcTokenFormReplay === 'true') {
@@ -1843,9 +1854,9 @@ def vc_manager_farm_script():
                 setTimeout(function() {
                     if (addButton.isConnected && !addButton.disabled) addButton.click();
                     else delete addButton.dataset.vcTokenFormReplay;
-                }, 120);
+                }, 300);
             };
-            clickHandler.vcVersion = 'v2';
+            clickHandler.vcVersion = 'v3';
             window.VCManagerTokenFormClickHandler = clickHandler;
             document.addEventListener('click', clickHandler, true);
         };
@@ -2601,7 +2612,7 @@ def vc_manager_farm_script():
     async def retire_previous_client(previous_client):
         try:
             previous_client._closing = True
-            for task_name in ("heartbeat_task", "listener_task", "reconnect_task"):
+            for task_name in ("heartbeat_task", "listener_task", "reconnect_task", "watchdog_task"):
                 task = getattr(previous_client, task_name, None)
                 if task and hasattr(task, "done") and not task.done():
                     task.cancel()
@@ -2659,11 +2670,13 @@ def vc_manager_farm_script():
             self.listener_task = None
             self.heartbeat_task = None
             self.reconnect_task = None
+            self.watchdog_task = None
             self._closing = False
             self._starting = False
             self._reconnect_attempts = 0
             self._retry_delay = None
             self._resume_on_hello = False
+            self._gateway_generation = 0
             self._heartbeat_acknowledged = True
             self._restore_task = None
             self._terminal_failure = False
@@ -2763,6 +2776,36 @@ def vc_manager_farm_script():
                 return None
 
         @staticmethod
+        def _normalise_gateway_base(value):
+            """Accept only Discord-owned secure Gateway endpoints."""
+            raw = str(value or "").strip()
+            if not raw:
+                return "wss://gateway.discord.gg"
+            try:
+                parsed = urlparse(raw if "://" in raw else f"wss://{raw}")
+                hostname = str(parsed.hostname or "").lower().rstrip(".")
+                if parsed.scheme.lower() != "wss" or not (
+                    hostname == "gateway.discord.gg" or hostname.endswith(".discord.gg")
+                ):
+                    return "wss://gateway.discord.gg"
+                port = f":{parsed.port}" if parsed.port else ""
+                path = str(parsed.path or "").rstrip("/")
+                return f"wss://{hostname}{port}{path}"
+            except (TypeError, ValueError):
+                return "wss://gateway.discord.gg"
+
+        def _clear_gateway_session(self):
+            """Forget an expired session so the next connection identifies cleanly."""
+            self.session_id = None
+            self.sequence = None
+            self.resume_gateway_url = None
+            self._resume_on_hello = False
+
+        def _gateway_transport_alive(self):
+            listener_alive = bool(self.listener_task and not self.listener_task.done())
+            return bool(self.ws and not self.ws.closed and listener_alive)
+
+        @staticmethod
         def _new_http_session():
             """Create a session whose lifetime is not capped by an HTTP total timeout."""
             timeout = aiohttp.ClientTimeout(
@@ -2782,8 +2825,8 @@ def vc_manager_farm_script():
                     5,
                 ),
                 4000: ("Gateway disconnected", "Discord reported an unknown gateway error. VC Manager will retry.", True, None),
-                4001: ("Gateway rejected", "Discord rejected a gateway operation. Reload the updated script before trying again.", False, None),
-                4002: ("Gateway rejected", "Discord could not decode a gateway payload. Reload the updated script before trying again.", False, None),
+                4001: ("Gateway reconnecting", "Discord rejected a gateway operation. VC Manager will open a fresh session.", True, 8),
+                4002: ("Gateway reconnecting", "Discord could not decode a gateway payload. VC Manager will open a fresh session.", True, 8),
                 4003: ("Gateway reconnecting", "Discord received voice data before login completed. VC Manager will retry.", True, 8),
                 4004: ("Token rejected", "Discord rejected this token. Remove the account, copy a fresh token, and add it again.", False, None),
                 4005: ("Gateway reconnecting", "Discord detected a duplicate login attempt. VC Manager will retry after a cooldown.", True, 12),
@@ -2792,6 +2835,7 @@ def vc_manager_farm_script():
                 4009: ("Gateway reconnecting", "The Discord gateway session timed out. VC Manager will open a fresh session.", True, 8),
                 4010: ("Gateway rejected", "Discord rejected the gateway shard configuration. Reload the updated script.", False, None),
                 4011: ("Gateway rejected", "Discord requires sharding for this account session, which VC Manager cannot provide.", False, None),
+                4012: ("Gateway rejected", "Discord rejected the Gateway API version. Update VC Manager before trying again.", False, None),
                 4013: ("Gateway rejected", "Discord rejected the gateway intents. Reload the updated script.", False, None),
                 4014: ("Gateway rejected", "Discord disallowed the requested gateway intents. Reload the updated script.", False, None),
             }
@@ -2977,9 +3021,9 @@ def vc_manager_farm_script():
                 return "The channel check failed. Open the Nighty console for the technical error."
             return ""
 
-        async def _send_gateway_login(self):
+        async def _send_gateway_login(self, gateway_ws):
             if self._resume_on_hello and self.session_id and self.sequence is not None:
-                await self.ws.send_json({
+                await gateway_ws.send_json({
                     "op": 6,
                     "d": {
                         "token": self.token,
@@ -2988,7 +3032,7 @@ def vc_manager_farm_script():
                     },
                 })
                 return
-            await self.ws.send_json({
+            await gateway_ws.send_json({
                 "op": 2,
                 "d": {
                     "token": self.token,
@@ -3105,19 +3149,65 @@ def vc_manager_farm_script():
             self.reconnect_task = safe_create_task(reconnect_until_open())
             return self.reconnect_task
 
+        def _ensure_watchdog(self):
+            existing = self.watchdog_task
+            if existing and not existing.done():
+                return existing
+
+            async def gateway_watchdog():
+                while not self._closing and not self._terminal_failure:
+                    await asyncio.sleep(20)
+                    if self._closing or self._terminal_failure:
+                        return
+
+                    if not self._gateway_transport_alive():
+                        stale_ws = self.ws
+                        if stale_ws and not stale_ws.closed:
+                            try:
+                                await stale_ws.close()
+                            except Exception as error:
+                                print(
+                                    f"[VC Manager] Could not close stale gateway for {self.name}: {error}",
+                                    type_="ERROR",
+                                )
+                        if self.ws is stale_ws:
+                            self.ws = None
+                        self._schedule_reconnect(0)
+                        continue
+
+                    if (
+                        self.desired_channel_id
+                        and (
+                            not self.is_in_vc
+                            or self.current_channel_id != self.desired_channel_id
+                        )
+                    ):
+                        self._schedule_voice_restore(0)
+
+            self.watchdog_task = safe_create_task(gateway_watchdog())
+            return self.watchdog_task
+
         async def start_gateway(self):
             if self._terminal_failure:
                 return False
-            if self.ws and not self.ws.closed:
+            if self._gateway_transport_alive():
                 return True
+            if self.ws and not self.ws.closed:
+                stale_ws = self.ws
+                try:
+                    await stale_ws.close()
+                except Exception as error:
+                    print(f"[VC Manager] Could not reset stale gateway for {self.name}: {error}", type_="ERROR")
+                if self.ws is stale_ws:
+                    self.ws = None
             if self._starting:
                 for _ in range(150):
                     await asyncio.sleep(0.1)
-                    if self.ws and not self.ws.closed:
+                    if self._gateway_transport_alive():
                         return True
                     if not self._starting:
                         break
-                return bool(self.ws and not self.ws.closed)
+                return self._gateway_transport_alive()
             self._starting = True
             start_lock = None
             try:
@@ -3131,21 +3221,49 @@ def vc_manager_farm_script():
             # WebSocket ping timer because zero can trigger a timeout at once.
             # Limit the opening handshake with asyncio.wait_for; some aiohttp
             # builds treat ws_connect's numeric timeout as a receive timeout.
-                gateway_base = self.resume_gateway_url or "wss://gateway.discord.gg"
-                gateway_url = f"{gateway_base.rstrip('/')}/?v=10&encoding=json"
-                self.ws = await asyncio.wait_for(
-                    self.http_session.ws_connect(
-                        gateway_url,
-                        heartbeat=None,
-                        autoclose=True,
-                        autoping=True,
-                    ),
-                    timeout=20,
+                resume_base = self._normalise_gateway_base(self.resume_gateway_url)
+                gateway_bases = [resume_base]
+                generic_base = "wss://gateway.discord.gg"
+                if resume_base != generic_base:
+                    gateway_bases.append(generic_base)
+
+                connection_error = None
+                self.ws = None
+                for gateway_base in gateway_bases:
+                    gateway_base = self._normalise_gateway_base(gateway_base)
+                    gateway_url = f"{gateway_base.rstrip('/')}/?v=10&encoding=json"
+                    try:
+                        self.ws = await asyncio.wait_for(
+                            self.http_session.ws_connect(
+                                gateway_url,
+                                heartbeat=None,
+                                autoclose=True,
+                                autoping=True,
+                            ),
+                            timeout=20,
+                        )
+                        break
+                    except Exception as error:
+                        connection_error = error
+                        print(
+                            f"[VC Manager] {self.name} could not open {gateway_base}: "
+                            f"{type(error).__name__}: {error}",
+                            type_="ERROR",
+                        )
+
+                if self.ws is None:
+                    raise connection_error or ConnectionError("Discord Gateway connection failed")
+
+                self._gateway_generation += 1
+                gateway_generation = self._gateway_generation
+                gateway_ws = self.ws
+                self.listener_task = safe_create_task(
+                    self._gateway_loop(gateway_ws, gateway_generation)
                 )
-                self.listener_task = safe_create_task(self._gateway_loop())
                 if self.listener_task is None:
                     self._set_status("Gateway failed", "Nighty could not start the account gateway task. Restart Nighty and try again.")
                     return False
+                self._ensure_watchdog()
                 return True
             except Exception as e:
                 print(f"[VC Manager] Gateway connect failed for {self.name}: {e}", type_="ERROR")
@@ -3162,21 +3280,25 @@ def vc_manager_farm_script():
                     start_lock.release()
                 self._starting = False
 
-        async def _heartbeat(self, interval):
+        async def _heartbeat(self, gateway_ws, gateway_generation, interval):
             try:
                 interval_seconds = max(float(interval) / 1000.0, 1.0)
                 await asyncio.sleep(random.random() * interval_seconds)
-                while self.ws and not self.ws.closed:
+                while (
+                    self.ws is gateway_ws
+                    and self._gateway_generation == gateway_generation
+                    and not gateway_ws.closed
+                ):
                     if not self._heartbeat_acknowledged:
                         self._retry_delay = 5
                         self._set_status(
                             "Reconnecting",
                             "Discord stopped acknowledging this account's gateway heartbeat. VC Manager is opening a fresh connection.",
                         )
-                        await self.ws.close(code=4000, message=b"Heartbeat ACK timeout")
+                        await gateway_ws.close(code=4000, message=b"Heartbeat ACK timeout")
                         return
                     self._heartbeat_acknowledged = False
-                    await self.ws.send_json({"op": 1, "d": self.sequence})
+                    await gateway_ws.send_json({"op": 1, "d": self.sequence})
                     await asyncio.sleep(interval_seconds)
             except asyncio.CancelledError:
                 pass
@@ -3184,10 +3306,11 @@ def vc_manager_farm_script():
                 if not self._closing:
                     print(f"[VC Manager] Heartbeat stopped for {self.name}: {error}", type_="ERROR")
 
-        async def _gateway_loop(self):
+        async def _gateway_loop(self, gateway_ws, gateway_generation):
             should_reconnect = True
+            gateway_heartbeat_task = None
             try:
-                async for msg in self.ws:
+                async for msg in gateway_ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         data = json.loads(msg.data)
                         if data.get("s") is not None:
@@ -3199,10 +3322,15 @@ def vc_manager_farm_script():
                         if op == 10:
                             interval = d["heartbeat_interval"]
                             self._heartbeat_acknowledged = True
-                            self.heartbeat_task = safe_create_task(self._heartbeat(interval))
-                            await self._send_gateway_login()
+                            if gateway_heartbeat_task and not gateway_heartbeat_task.done():
+                                gateway_heartbeat_task.cancel()
+                            gateway_heartbeat_task = safe_create_task(
+                                self._heartbeat(gateway_ws, gateway_generation, interval)
+                            )
+                            self.heartbeat_task = gateway_heartbeat_task
+                            await self._send_gateway_login(gateway_ws)
                         elif op == 1:
-                            await self.ws.send_json({"op": 1, "d": self.sequence})
+                            await gateway_ws.send_json({"op": 1, "d": self.sequence})
                         elif op == 11:
                             self._heartbeat_acknowledged = True
                         elif t == "READY":
@@ -3283,20 +3411,19 @@ def vc_manager_farm_script():
                                     self._set_status("Connected")
                         elif op == 7:
                             self._set_status("Reconnecting")
-                            await self.ws.close()
+                            await gateway_ws.close()
                         elif op == 9:
                             can_resume = bool(d)
                             if not can_resume:
-                                self.session_id = None
-                                self.sequence = None
-                                self.resume_gateway_url = None
-                                self._resume_on_hello = False
+                                self._clear_gateway_session()
                             self._retry_delay = 8
                             self._set_status("Reconnecting")
-                            await self.ws.close()
+                            await gateway_ws.close()
                     elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
-                        close_code = getattr(self.ws, "close_code", None)
+                        close_code = getattr(gateway_ws, "close_code", None)
                         status, message, should_reconnect, retry_delay = self._gateway_close_details(close_code)
+                        if self._normalise_close_code(close_code) in (4001, 4002, 4003, 4005, 4007, 4009):
+                            self._clear_gateway_session()
                         if not should_reconnect:
                             self._terminal_failure = True
                         self._retry_delay = retry_delay
@@ -3304,10 +3431,12 @@ def vc_manager_farm_script():
                             self._set_status(status, message)
                         break
                     elif msg.type == aiohttp.WSMsgType.ERROR:
-                        close_code = getattr(self.ws, "close_code", None)
+                        close_code = getattr(gateway_ws, "close_code", None)
                         close_code_value = self._normalise_close_code(close_code)
-                        exception = self.ws.exception() if self.ws else None
+                        exception = gateway_ws.exception()
                         status, message, should_reconnect, retry_delay = self._gateway_close_details(close_code)
+                        if close_code_value in (4001, 4002, 4003, 4005, 4007, 4009):
+                            self._clear_gateway_session()
                         if not should_reconnect:
                             self._terminal_failure = True
                         self._retry_delay = retry_delay
@@ -3334,16 +3463,29 @@ def vc_manager_farm_script():
                 if not self.last_error:
                     self._set_status("Gateway failed", "The account lost its Discord connection. VC Manager will retry it.")
             finally:
-                self.is_in_vc = False
-                self.current_channel_id = None
-                self.current_guild_id = None
-                if self.heartbeat_task and not self.heartbeat_task.done():
-                    self.heartbeat_task.cancel()
-                if self._restore_task and not self._restore_task.done():
-                    self._restore_task.cancel()
-                self._restore_task = None
+                if not gateway_ws.closed:
+                    try:
+                        await gateway_ws.close()
+                    except Exception as error:
+                        print(f"[VC Manager] Could not close gateway for {self.name}: {error}", type_="ERROR")
+                is_current_generation = (
+                    self.ws is gateway_ws and self._gateway_generation == gateway_generation
+                )
+                if is_current_generation:
+                    self.ws = None
+                    self.is_in_vc = False
+                    self.current_channel_id = None
+                    self.current_guild_id = None
+                if gateway_heartbeat_task and not gateway_heartbeat_task.done():
+                    gateway_heartbeat_task.cancel()
+                if self.heartbeat_task is gateway_heartbeat_task:
+                    self.heartbeat_task = None
+                if is_current_generation:
+                    if self._restore_task and not self._restore_task.done():
+                        self._restore_task.cancel()
+                    self._restore_task = None
                 self._refresh_row()
-                if not self._closing and should_reconnect:
+                if is_current_generation and not self._closing and should_reconnect:
                     self._reconnect_attempts += 1
                     delay = self._retry_delay or min(5 * (2 ** min(self._reconnect_attempts - 1, 5)), 300)
                     delay += random.uniform(0.0, min(5.0, delay * 0.15))
@@ -3613,6 +3755,8 @@ def vc_manager_farm_script():
                 self.listener_task.cancel()
             if self.reconnect_task:
                 self.reconnect_task.cancel()
+            if self.watchdog_task:
+                self.watchdog_task.cancel()
             if self._restore_task:
                 self._restore_task.cancel()
             if self.ws and not self.ws.closed:
@@ -6337,10 +6481,10 @@ def vc_manager_farm_script():
             value = value[0] if value else ""
         return str(value or "")
 
-    def handle_token_input(value):
+    def handle_token_input(value="", *_args, **_kwargs):
         token_form_state["token"] = form_input_text(value)
 
-    def handle_token_name_input(value):
+    def handle_token_name_input(value="", *_args, **_kwargs):
         token_form_state["name"] = form_input_text(value)
 
     async def handle_add_token():
@@ -6348,7 +6492,7 @@ def vc_manager_farm_script():
         try:
             # Yield once so mobile input callbacks queued immediately before the
             # tap can update token_form_state before this handler reads it.
-            await asyncio.sleep(0.12)
+            await asyncio.sleep(0.25)
             token_value = token_form_state.get("token") or form_input_text(ui_refs["token_input"].value)
             name_value = token_form_state.get("name") or form_input_text(ui_refs["token_name_input"].value)
             tok = token_value.strip().strip('"').strip("'").strip()
