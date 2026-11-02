@@ -1305,7 +1305,7 @@ def vc_manager_farm_script():
 
     VC_UI_JS = """
     (function() {
-        const uiVersion = 'vc-manager-ui-v6';
+        const uiVersion = 'vc-manager-ui-v7';
         if (
             window.VCManagerUIVersion === uiVersion &&
             (window.VCManagerLayoutObserver || window.VCManagerLayoutTimer)
@@ -1688,8 +1688,17 @@ def vc_manager_farm_script():
                     tokenMenu.style.display = 'none';
                     this.action(pagerId, item.id, 'remove');
                 };
+                const copyTokenButton = document.createElement('button');
+                copyTokenButton.type = 'button';
+                copyTokenButton.textContent = 'Copy Token';
+                copyTokenButton.style.cssText = 'width:100%;border:0;background:transparent;border-radius:6px;padding:8px 10px;text-align:left;font-size:12px;font-weight:600;cursor:pointer;';
+                copyTokenButton.onclick = event => {
+                    event.stopPropagation();
+                    tokenMenu.style.display = 'none';
+                    this.action(pagerId, item.id, 'copy-token');
+                };
                 tokenMenu.onclick = event => event.stopPropagation();
-                tokenMenu.appendChild(removeTokenButton);
+                tokenMenu.append(copyTokenButton, removeTokenButton);
                 menuButton.onclick = event => {
                     event.stopPropagation();
                     const shouldOpen = tokenMenu.style.display === 'none';
@@ -1791,7 +1800,7 @@ def vc_manager_farm_script():
         window.wireVCManagerTokenForm = function() {
             if (
                 window.VCManagerTokenFormClickHandler &&
-                window.VCManagerTokenFormClickHandler.vcVersion === 'v3'
+                window.VCManagerTokenFormClickHandler.vcVersion === 'v4'
             ) return;
             if (window.VCManagerTokenFormClickHandler) {
                 document.removeEventListener('click', window.VCManagerTokenFormClickHandler, true);
@@ -1812,7 +1821,7 @@ def vc_manager_farm_script():
                 const target = event.target && event.target.closest
                     ? event.target.closest('button')
                     : null;
-                if (!target || target.textContent.trim() !== 'Add Account') return;
+                if (!target || !target.textContent.includes('Add Account')) return;
                 const isTokenCard = function(element) {
                     if (!element || !element.querySelectorAll) return false;
                     const hasTitle = Array.from(element.querySelectorAll('*')).some(child =>
@@ -1837,6 +1846,12 @@ def vc_manager_farm_script():
 
                 const inputs = Array.from(card.querySelectorAll('input')).slice(0, 2);
                 if (inputs.length === 0) return;
+                const payload = JSON.stringify({
+                    token: inputs[0] ? String(inputs[0].value || '') : '',
+                    name: inputs[1] ? String(inputs[1].value || '') : ''
+                });
+                addButton.value = payload;
+                addButton.setAttribute('value', payload);
 
                 // Mobile browsers can deliver the button click before the final
                 // controlled-input update. Send input/change first, then replay
@@ -1856,7 +1871,7 @@ def vc_manager_farm_script():
                     else delete addButton.dataset.vcTokenFormReplay;
                 }, 300);
             };
-            clickHandler.vcVersion = 'v3';
+            clickHandler.vcVersion = 'v4';
             window.VCManagerTokenFormClickHandler = clickHandler;
             document.addEventListener('click', clickHandler, true);
         };
@@ -6487,14 +6502,30 @@ def vc_manager_farm_script():
     def handle_token_name_input(value="", *_args, **_kwargs):
         token_form_state["name"] = form_input_text(value)
 
-    async def handle_add_token():
+    async def handle_add_token(payload=None, *_args, **_kwargs):
         add_token_btn.loading = True
         try:
             # Yield once so mobile input callbacks queued immediately before the
             # tap can update token_form_state before this handler reads it.
             await asyncio.sleep(0.25)
-            token_value = token_form_state.get("token") or form_input_text(ui_refs["token_input"].value)
-            name_value = token_form_state.get("name") or form_input_text(ui_refs["token_name_input"].value)
+            callback_data = payload if isinstance(payload, dict) else {}
+            if isinstance(payload, str):
+                try:
+                    parsed_payload = json.loads(payload)
+                    if isinstance(parsed_payload, dict):
+                        callback_data = parsed_payload
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    callback_data = {}
+            token_value = (
+                form_input_text(callback_data.get("token"))
+                or token_form_state.get("token")
+                or form_input_text(ui_refs["token_input"].value)
+            )
+            name_value = (
+                form_input_text(callback_data.get("name"))
+                or token_form_state.get("name")
+                or form_input_text(ui_refs["token_name_input"].value)
+            )
             tok = token_value.strip().strip('"').strip("'").strip()
             name = name_value.strip() or f"Token #{len(token_clients)+1}"
 
@@ -6779,6 +6810,9 @@ def vc_manager_farm_script():
         if action == "remove":
             handle_token_remove(row_id)
             return
+        if action == "copy-token":
+            handle_token_copy(row_id)
+            return
         if action == "logs":
             handle_token_history(row_id)
             return
@@ -6967,6 +7001,49 @@ def vc_manager_farm_script():
             tab.toast("Account removed", "VC Manager removed the saved token.", "SUCCESS")
 
         safe_create_task(remove_token())
+
+    def handle_token_copy(row_id):
+        row_id_str = str(row_id)
+        data = load_tokens()
+        if data.get("_load_error"):
+            tab.toast("Token file is broken", data["_load_error"], "ERROR")
+            return
+        record = next(
+            (
+                item for item in data.get("tokens", [])
+                if isinstance(item, dict) and str(item.get("id") or "") == row_id_str
+            ),
+            None,
+        )
+        token_value = str(record.get("token") or "") if record else ""
+        account_name = str(record.get("name") or record.get("label") or "managed account") if record else "managed account"
+        if not token_value:
+            tab.toast("Token unavailable", "Refresh Managed Accounts and try again.", "ERROR")
+            return
+
+        token_json = json.dumps(token_value)
+        name_json = json.dumps(account_name)
+        evaluate_js(
+            f"""
+            (function() {{
+                const token = {token_json};
+                const accountName = {name_json};
+                const fallback = function() {{
+                    window.prompt('Copy the token for ' + accountName, token);
+                }};
+                if (navigator.clipboard && window.isSecureContext) {{
+                    navigator.clipboard.writeText(token).catch(fallback);
+                }} else {{
+                    fallback();
+                }}
+            }})();
+            """
+        )
+        tab.toast(
+            "Copy token",
+            "The token was sent to your clipboard. If the browser blocks clipboard access, copy it from the prompt.",
+            "SUCCESS",
+        )
 
     def handle_token_leave(row_id):
         handle_token_connection(str(row_id), "leave")
