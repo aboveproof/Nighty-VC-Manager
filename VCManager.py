@@ -961,6 +961,29 @@ def vc_manager_farm_script():
                 </div>
             """
 
+    @cui_new(type="element")
+    class TokenAccountForm:
+        _init_params = ["self", "form_id", "on_add"]
+
+        def __init__(self, form_id=None, on_add=None):
+            self.funcs = [on_add]
+            self.html = """
+                <div id="${data.form_id}" data-vc-token-form style="display:flex;flex-direction:column;gap:12px;width:100%;">
+                    <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;">
+                        <span>User Token</span>
+                        <input data-vc-token-input type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste Discord token..." style="width:100%;box-sizing:border-box;min-height:54px;padding:10px 12px;border:2px solid rgba(255,255,255,.18);border-radius:8px;background:rgba(8,12,20,.35);color:inherit;font:inherit;font-size:16px;outline:none;" />
+                    </label>
+                    <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;">
+                        <span>Account Label</span>
+                        <input data-vc-token-name type="text" autocomplete="off" placeholder="e.g. Alt #1" style="width:100%;box-sizing:border-box;min-height:54px;padding:10px 12px;border:2px solid rgba(255,255,255,.18);border-radius:8px;background:rgba(8,12,20,.35);color:inherit;font:inherit;font-size:16px;outline:none;" />
+                    </label>
+                    <div>
+                        <button type="button" data-vc-token-submit onclick="window.VCManagerTokenForm.submit(this)" style="border:0;border-radius:8px;padding:10px 16px;background:#168bd2;color:#fff;font:inherit;font-weight:600;cursor:pointer;">Add Account</button>
+                    </div>
+                    <button type="button" data-vc-token-proxy onclick="${on_add}" style="display:none;"></button>
+                </div>
+            """
+
     class CardPager:
         _jsinj = False
 
@@ -1305,7 +1328,7 @@ def vc_manager_farm_script():
 
     VC_UI_JS = """
     (function() {
-        const uiVersion = 'vc-manager-ui-v7';
+        const uiVersion = 'vc-manager-ui-v8';
         if (
             window.VCManagerUIVersion === uiVersion &&
             (window.VCManagerLayoutObserver || window.VCManagerLayoutTimer)
@@ -1797,85 +1820,36 @@ def vc_manager_farm_script():
             });
         };
 
-        window.wireVCManagerTokenForm = function() {
-            if (
-                window.VCManagerTokenFormClickHandler &&
-                window.VCManagerTokenFormClickHandler.vcVersion === 'v4'
-            ) return;
-            if (window.VCManagerTokenFormClickHandler) {
-                document.removeEventListener('click', window.VCManagerTokenFormClickHandler, true);
-            }
-
-            const dispatchInputEvent = function(input, eventName) {
-                let event;
-                try {
-                    event = new Event(eventName, { bubbles: true, cancelable: false, composed: true });
-                } catch (error) {
-                    event = document.createEvent('Event');
-                    event.initEvent(eventName, true, false);
-                }
-                input.dispatchEvent(event);
-            };
-
-            const clickHandler = function(event) {
-                const target = event.target && event.target.closest
-                    ? event.target.closest('button')
-                    : null;
-                if (!target || !target.textContent.includes('Add Account')) return;
-                const isTokenCard = function(element) {
-                    if (!element || !element.querySelectorAll) return false;
-                    const hasTitle = Array.from(element.querySelectorAll('*')).some(child =>
-                        child.childElementCount === 0 && child.textContent.trim() === 'Multi-Token Accounts'
-                    );
-                    return hasTitle && element.querySelectorAll('input').length >= 2;
-                };
-                let card = target.closest('.card');
-                if (!isTokenCard(card)) {
-                    card = target.parentElement;
-                    while (card && card !== document.body && !isTokenCard(card)) {
-                        card = card.parentElement;
-                    }
-                }
-                if (!isTokenCard(card)) return;
-
-                const addButton = target;
-                if (addButton.dataset.vcTokenFormReplay === 'true') {
-                    delete addButton.dataset.vcTokenFormReplay;
-                    return;
-                }
-
-                const inputs = Array.from(card.querySelectorAll('input')).slice(0, 2);
-                if (inputs.length === 0) return;
+        if (window.VCManagerTokenFormClickHandler) {
+            document.removeEventListener('click', window.VCManagerTokenFormClickHandler, true);
+            window.VCManagerTokenFormClickHandler = null;
+        }
+        window.wireVCManagerTokenForm = function() {};
+        window.VCManagerTokenForm = {
+            submit: function(button) {
+                const form = button && button.closest ? button.closest('[data-vc-token-form]') : null;
+                if (!form) return;
+                const tokenInput = form.querySelector('[data-vc-token-input]');
+                const nameInput = form.querySelector('[data-vc-token-name]');
+                const proxy = form.querySelector('[data-vc-token-proxy]');
+                if (!tokenInput || !proxy) return;
                 const payload = JSON.stringify({
-                    token: inputs[0] ? String(inputs[0].value || '') : '',
-                    name: inputs[1] ? String(inputs[1].value || '') : ''
+                    token: String(tokenInput.value || ''),
+                    name: nameInput ? String(nameInput.value || '') : ''
                 });
-                addButton.value = payload;
-                addButton.setAttribute('value', payload);
-
-                // Mobile browsers can deliver the button click before the final
-                // controlled-input update. Send input/change first, then replay
-                // the click after Nighty's callback queue has received them.
-                event.preventDefault();
-                event.stopPropagation();
-                if (typeof event.stopImmediatePropagation === 'function') {
-                    event.stopImmediatePropagation();
-                }
-                inputs.forEach(input => {
-                    dispatchInputEvent(input, 'input');
-                    dispatchInputEvent(input, 'change');
-                });
-                addButton.dataset.vcTokenFormReplay = 'true';
-                setTimeout(function() {
-                    if (addButton.isConnected && !addButton.disabled) addButton.click();
-                    else delete addButton.dataset.vcTokenFormReplay;
-                }, 300);
-            };
-            clickHandler.vcVersion = 'v4';
-            window.VCManagerTokenFormClickHandler = clickHandler;
-            document.addEventListener('click', clickHandler, true);
+                proxy.value = payload;
+                proxy.setAttribute('value', payload);
+                proxy.click();
+            },
+            clear: function(formId) {
+                const form = document.getElementById(formId);
+                if (!form) return;
+                const tokenInput = form.querySelector('[data-vc-token-input]');
+                const nameInput = form.querySelector('[data-vc-token-name]');
+                if (tokenInput) tokenInput.value = '';
+                if (nameInput) nameInput.value = '';
+            }
         };
-        window.wireVCManagerTokenForm();
 
         window.sizeVCParticipantCard = function() {
             const findCard = prefix => {
@@ -2499,7 +2473,6 @@ def vc_manager_farm_script():
     selected_token_channel_id = None
     _updating_dropdowns = False
     ui_refs = {}
-    token_form_state = {"token": "", "name": ""}
     status_editor_channel_id = None
     # VC Manager owns connections opened through this script. Ignore Nighty's
     # separate voice session.
@@ -5480,11 +5453,12 @@ def vc_manager_farm_script():
     token_add_page.create_ui_element(UI.Text, content="Multi-Token Accounts", size="lg", weight="bold")
     token_add_page.create_ui_element(UI.Text, content="Connect secondary user accounts", size="sm")
 
-    token_input = token_add_page.create_ui_element(UI.Input, label="User Token", placeholder="Paste Discord token...", full_width=True)
-    token_name_input = token_add_page.create_ui_element(UI.Input, label="Account Label", placeholder="e.g. Alt #1", full_width=True)
-
-    token_btn_group = token_add_page.create_group(type="columns", gap=2)
-    add_token_btn = token_btn_group.create_ui_element(UI.Button, label="Add Account", variant="solid", color="primary")
+    token_form_id = f"vc-token-account-form-{id(token_add_page)}"
+    token_add_page.create_ui_element(
+        UI.TokenAccountForm,
+        form_id=token_form_id,
+        on_add=lambda payload: safe_create_task(handle_add_token(payload)),
+    )
 
     token_bulk_page = token_pager_page.create_group(type="rows", gap=3, full_width=True)
     token_bulk_page.create_ui_element(UI.Text, content="Bulk Account Controls", size="lg", weight="bold")
@@ -5511,8 +5485,6 @@ def vc_manager_farm_script():
     disc_all_btn = token_bulk_actions.create_ui_element(UI.Button, label="Leave All", variant="solid", color="danger")
     token_pager.build()
 
-    ui_refs["token_input"] = token_input
-    ui_refs["token_name_input"] = token_name_input
 
     destination_card = multi_token_setup_row.create_card(
         type="rows", width="full", height="auto", gap=3
@@ -6496,18 +6468,8 @@ def vc_manager_farm_script():
             value = value[0] if value else ""
         return str(value or "")
 
-    def handle_token_input(value="", *_args, **_kwargs):
-        token_form_state["token"] = form_input_text(value)
-
-    def handle_token_name_input(value="", *_args, **_kwargs):
-        token_form_state["name"] = form_input_text(value)
-
     async def handle_add_token(payload=None, *_args, **_kwargs):
-        add_token_btn.loading = True
         try:
-            # Yield once so mobile input callbacks queued immediately before the
-            # tap can update token_form_state before this handler reads it.
-            await asyncio.sleep(0.25)
             callback_data = payload if isinstance(payload, dict) else {}
             if isinstance(payload, str):
                 try:
@@ -6518,13 +6480,9 @@ def vc_manager_farm_script():
                     callback_data = {}
             token_value = (
                 form_input_text(callback_data.get("token"))
-                or token_form_state.get("token")
-                or form_input_text(ui_refs["token_input"].value)
             )
             name_value = (
                 form_input_text(callback_data.get("name"))
-                or token_form_state.get("name")
-                or form_input_text(ui_refs["token_name_input"].value)
             )
             tok = token_value.strip().strip('"').strip("'").strip()
             name = name_value.strip() or f"Token #{len(token_clients)+1}"
@@ -6572,10 +6530,10 @@ def vc_manager_farm_script():
                         "Discord did not finish signing this account in. Check the token, account verification, VPN, and firewall."
                     )
 
-            ui_refs["token_input"].value = ""
-            ui_refs["token_name_input"].value = ""
-            token_form_state["token"] = ""
-            token_form_state["name"] = ""
+            evaluate_js(
+                f"if (window.VCManagerTokenForm) "
+                f"window.VCManagerTokenForm.clear({json.dumps(token_form_id)});"
+            )
             refresh_destination_account_items(preserve_selection=True)
             update_token_table_rows()
             if client.user_id:
@@ -6589,8 +6547,6 @@ def vc_manager_farm_script():
         except Exception as e:
             print(f"[VC Manager] Could not add managed account: {e}", type_="ERROR")
             tab.toast("Account could not be added", f"VC Manager stopped before the account was ready: {type(e).__name__}. Check the Nighty console for the full error.", "ERROR")
-        finally:
-            add_token_btn.loading = False
 
     async def handle_conn_all_tokens():
         conn_all_btn.loading = True
@@ -7067,8 +7023,6 @@ def vc_manager_farm_script():
     leave_alone_toggle.onChange = handle_leave_alone_toggle
     follow_toggle.onChange = handle_follow_toggle
     follow_target_input.onInput = handle_follow_target_input
-    token_input.onInput = handle_token_input
-    token_name_input.onInput = handle_token_name_input
     apply_timer_btn.onClick = handle_apply_timer
     command_ephemeral_toggle.onChange = handle_command_ephemeral_toggle
     command_theme_toggle.onChange = handle_command_theme_toggle
@@ -7077,7 +7031,6 @@ def vc_manager_farm_script():
     logs_btn.onClick = handle_open_history
     set_channel_status_btn.onClick = handle_set_channel_status
     clear_channel_status_btn.onClick = handle_clear_channel_status
-    add_token_btn.onClick = handle_add_token
     bulk_mute_toggle.onChange = handle_bulk_mute_toggle
     bulk_deafen_toggle.onChange = handle_bulk_deafen_toggle
     bulk_stream_toggle.onChange = handle_bulk_stream_toggle
