@@ -294,19 +294,22 @@ def vc_manager_farm_script():
         };
 
         cui.invokeCallback = async function(hookId, callbackName, value) {
-            let lastError = null;
             for (let attempt = 0; attempt < 20; attempt += 1) {
                 const bridge = window.pywebview && window.pywebview.api;
                 if (bridge && typeof bridge.customCallback === 'function') {
                     try {
                         return await bridge.customCallback('_cui_cb', hookId, callbackName, value);
                     } catch (error) {
-                        lastError = error;
+                        // The Python callback may already have completed before
+                        // the bridge reports a serialization error. Replaying a
+                        // state-changing callback can add the same account many
+                        // times, so only retry while the bridge is unavailable.
+                        throw error;
                     }
                 }
                 await new Promise(function(resolve) { setTimeout(resolve, 100); });
             }
-            throw lastError || new Error('Nighty callback bridge is not ready');
+            throw new Error('Nighty callback bridge is not ready');
         };
 
         const callbackHandler = function(hookId, callbackName) {
@@ -968,17 +971,30 @@ def vc_manager_farm_script():
         def __init__(self, form_id=None, on_add=None):
             self.funcs = [on_add]
             self.html = """
-                <div id="${data.form_id}" data-vc-token-form style="display:flex;flex-direction:column;gap:12px;width:100%;">
-                    <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;">
+                <style>
+                    .vc-token-account-form { display:flex; flex-direction:column; gap:14px; width:100%; min-height:238px; padding-top:2px; box-sizing:border-box; }
+                    .vc-token-account-form label { display:flex; flex-direction:column; gap:7px; font-size:12px; font-weight:500; line-height:1.2; }
+                    .vc-token-account-form input { width:100%; min-width:0; min-height:48px; box-sizing:border-box; padding:0 14px; border:1px solid rgba(255,255,255,.18); border-radius:9px; background:rgba(8,12,20,.34); color:inherit; font:inherit; font-size:16px; outline:none; transition:border-color .18s ease, background-color .18s ease, box-shadow .18s ease; }
+                    .vc-token-account-form input:focus { border-color:rgba(67,151,218,.85); background:rgba(8,12,20,.5); box-shadow:0 0 0 3px rgba(38,143,213,.13); }
+                    .vc-token-account-actions { display:flex; align-items:center; margin-top:auto; }
+                    .vc-token-account-submit { min-height:40px; border:1px solid rgba(255,255,255,.08); border-radius:8px; padding:0 16px; background:#268fd5; color:#fff; font:inherit; font-weight:600; cursor:pointer; transition:background-color .18s ease, transform .12s ease, opacity .18s ease; }
+                    .vc-token-account-submit:hover { background:#3199dd; }
+                    .vc-token-account-submit:active { transform:translateY(1px); }
+                    .vc-token-account-submit:focus-visible { outline:2px solid rgba(126,192,240,.9); outline-offset:2px; }
+                    .vc-token-account-submit:disabled { cursor:wait; opacity:.68; }
+                    @media (max-width:640px) { .vc-token-account-form { min-height:0; } .vc-token-account-submit { min-height:44px; } }
+                </style>
+                <div id="${data.form_id}" class="vc-token-account-form" data-vc-token-form>
+                    <label>
                         <span>User Token</span>
-                        <input data-vc-token-input type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste Discord token..." style="width:100%;box-sizing:border-box;min-height:54px;padding:10px 12px;border:2px solid rgba(255,255,255,.18);border-radius:8px;background:rgba(8,12,20,.35);color:inherit;font:inherit;font-size:16px;outline:none;" />
+                        <input data-vc-token-input type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste Discord token..." />
                     </label>
-                    <label style="display:flex;flex-direction:column;gap:5px;font-size:12px;">
+                    <label>
                         <span>Account Label</span>
-                        <input data-vc-token-name type="text" autocomplete="off" placeholder="e.g. Alt #1" style="width:100%;box-sizing:border-box;min-height:54px;padding:10px 12px;border:2px solid rgba(255,255,255,.18);border-radius:8px;background:rgba(8,12,20,.35);color:inherit;font:inherit;font-size:16px;outline:none;" />
+                        <input data-vc-token-name type="text" autocomplete="off" placeholder="e.g. Alt #1" />
                     </label>
-                    <div>
-                        <button type="button" data-vc-token-submit onclick="window.VCManagerTokenForm.submit(this)" style="border:0;border-radius:8px;padding:10px 16px;background:#168bd2;color:#fff;font:inherit;font-weight:600;cursor:pointer;">Add Account</button>
+                    <div class="vc-token-account-actions">
+                        <button type="button" class="vc-token-account-submit" data-vc-token-submit onclick="window.VCManagerTokenForm.submit(this)">Add Account</button>
                     </div>
                     <button type="button" data-vc-token-proxy onclick="${on_add}" style="display:none;"></button>
                 </div>
@@ -1328,7 +1344,7 @@ def vc_manager_farm_script():
 
     VC_UI_JS = """
     (function() {
-        const uiVersion = 'vc-manager-ui-v8';
+        const uiVersion = 'vc-manager-ui-v9';
         if (
             window.VCManagerUIVersion === uiVersion &&
             (window.VCManagerLayoutObserver || window.VCManagerLayoutTimer)
@@ -1827,27 +1843,42 @@ def vc_manager_farm_script():
         window.wireVCManagerTokenForm = function() {};
         window.VCManagerTokenForm = {
             submit: function(button) {
+                if (!button || button.dataset.vcSubmitting === 'true') return;
                 const form = button && button.closest ? button.closest('[data-vc-token-form]') : null;
                 if (!form) return;
                 const tokenInput = form.querySelector('[data-vc-token-input]');
                 const nameInput = form.querySelector('[data-vc-token-name]');
                 const proxy = form.querySelector('[data-vc-token-proxy]');
                 if (!tokenInput || !proxy) return;
+                button.dataset.vcSubmitting = 'true';
+                button.disabled = true;
+                button.textContent = 'Adding...';
                 const payload = JSON.stringify({
                     token: String(tokenInput.value || ''),
-                    name: nameInput ? String(nameInput.value || '') : ''
+                    name: nameInput ? String(nameInput.value || '') : '',
+                    request_id: (
+                        window.crypto && typeof window.crypto.randomUUID === 'function'
+                            ? window.crypto.randomUUID()
+                            : String(Date.now()) + '-' + Math.random().toString(16).slice(2)
+                    )
                 });
                 proxy.value = payload;
                 proxy.setAttribute('value', payload);
                 proxy.click();
             },
-            clear: function(formId) {
+            finish: function(formId, shouldClear) {
                 const form = document.getElementById(formId);
                 if (!form) return;
                 const tokenInput = form.querySelector('[data-vc-token-input]');
                 const nameInput = form.querySelector('[data-vc-token-name]');
-                if (tokenInput) tokenInput.value = '';
-                if (nameInput) nameInput.value = '';
+                const submitButton = form.querySelector('[data-vc-token-submit]');
+                if (shouldClear && tokenInput) tokenInput.value = '';
+                if (shouldClear && nameInput) nameInput.value = '';
+                if (submitButton) {
+                    delete submitButton.dataset.vcSubmitting;
+                    submitButton.disabled = false;
+                    submitButton.textContent = 'Add Account';
+                }
             }
         };
 
@@ -2473,6 +2504,7 @@ def vc_manager_farm_script():
     selected_token_channel_id = None
     _updating_dropdowns = False
     ui_refs = {}
+    token_add_requests = {}
     status_editor_channel_id = None
     # VC Manager owns connections opened through this script. Ignore Nighty's
     # separate voice session.
@@ -5457,7 +5489,7 @@ def vc_manager_farm_script():
     token_add_page.create_ui_element(
         UI.TokenAccountForm,
         form_id=token_form_id,
-        on_add=lambda payload: safe_create_task(handle_add_token(payload)),
+        on_add=lambda payload: (safe_create_task(handle_add_token(payload)), None)[1],
     )
 
     token_bulk_page = token_pager_page.create_group(type="rows", gap=3, full_width=True)
@@ -6469,6 +6501,9 @@ def vc_manager_farm_script():
         return str(value or "")
 
     async def handle_add_token(payload=None, *_args, **_kwargs):
+        account_saved = False
+        request_id = ""
+        should_finish = True
         try:
             callback_data = payload if isinstance(payload, dict) else {}
             if isinstance(payload, str):
@@ -6478,6 +6513,16 @@ def vc_manager_farm_script():
                         callback_data = parsed_payload
                 except (TypeError, ValueError, json.JSONDecodeError):
                     callback_data = {}
+            request_id = str(callback_data.get("request_id") or "")
+            now = time.monotonic()
+            for old_request_id, created_at in list(token_add_requests.items()):
+                if now - created_at > 300:
+                    token_add_requests.pop(old_request_id, None)
+            if request_id and request_id in token_add_requests:
+                should_finish = False
+                return
+            if request_id:
+                token_add_requests[request_id] = now
             token_value = (
                 form_input_text(callback_data.get("token"))
             )
@@ -6513,6 +6558,7 @@ def vc_manager_farm_script():
             if not save_tokens(data):
                 tab.toast("Could not save account", f"Nighty could not write {TOKENS_DATA_PATH.name}. Check folder permissions and free disk space.", "ERROR")
                 return
+            account_saved = True
 
             client = GatewayVoiceClient(tok, name=name, record_id=new_id)
             token_clients[new_id] = client
@@ -6530,10 +6576,6 @@ def vc_manager_farm_script():
                         "Discord did not finish signing this account in. Check the token, account verification, VPN, and firewall."
                     )
 
-            evaluate_js(
-                f"if (window.VCManagerTokenForm) "
-                f"window.VCManagerTokenForm.clear({json.dumps(token_form_id)});"
-            )
             refresh_destination_account_items(preserve_selection=True)
             update_token_table_rows()
             if client.user_id:
@@ -6547,6 +6589,12 @@ def vc_manager_farm_script():
         except Exception as e:
             print(f"[VC Manager] Could not add managed account: {e}", type_="ERROR")
             tab.toast("Account could not be added", f"VC Manager stopped before the account was ready: {type(e).__name__}. Check the Nighty console for the full error.", "ERROR")
+        finally:
+            if should_finish:
+                evaluate_js(
+                    f"if (window.VCManagerTokenForm) "
+                    f"window.VCManagerTokenForm.finish({json.dumps(token_form_id)}, {json.dumps(account_saved)});"
+                )
 
     async def handle_conn_all_tokens():
         conn_all_btn.loading = True
