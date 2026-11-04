@@ -24,7 +24,7 @@ def vc_manager_farm_script():
     /vc stream <state>      - Explicitly enable or disable screen share
     /vc camera <state>      - Explicitly enable or disable camera video
     /vc list                - List current participants
-    /vc history             - Show recent session history
+    /vc history [page]      - Browse saved session history
     /vc status              - Show the managed connection state
     /vc stats               - Show tracked voice usage statistics
     /vc settings            - View or update slash-response settings
@@ -972,17 +972,17 @@ def vc_manager_farm_script():
             self.funcs = [on_add]
             self.html = """
                 <style>
-                    .vc-token-account-form { display:flex; flex-direction:column; gap:14px; width:100%; min-height:238px; padding-top:2px; box-sizing:border-box; }
+                    .vc-token-account-form { display:flex; flex-direction:column; gap:12px; width:100%; min-height:238px; padding-top:2px; box-sizing:border-box; }
                     .vc-token-account-form label { display:flex; flex-direction:column; gap:7px; font-size:12px; font-weight:500; line-height:1.2; }
                     .vc-token-account-form input { width:100%; min-width:0; min-height:48px; box-sizing:border-box; padding:0 14px; border:1px solid rgba(255,255,255,.18); border-radius:9px; background:rgba(8,12,20,.34); color:inherit; font:inherit; font-size:16px; outline:none; transition:border-color .18s ease, background-color .18s ease, box-shadow .18s ease; }
                     .vc-token-account-form input:focus { border-color:rgba(67,151,218,.85); background:rgba(8,12,20,.5); box-shadow:0 0 0 3px rgba(38,143,213,.13); }
-                    .vc-token-account-actions { display:flex; align-items:center; margin-top:auto; }
+                    .vc-token-account-actions { display:flex; align-items:center; margin-top:auto; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); }
                     .vc-token-account-submit { min-height:40px; border:1px solid rgba(255,255,255,.08); border-radius:8px; padding:0 16px; background:#268fd5; color:#fff; font:inherit; font-weight:600; cursor:pointer; transition:background-color .18s ease, transform .12s ease, opacity .18s ease; }
                     .vc-token-account-submit:hover { background:#3199dd; }
                     .vc-token-account-submit:active { transform:translateY(1px); }
                     .vc-token-account-submit:focus-visible { outline:2px solid rgba(126,192,240,.9); outline-offset:2px; }
                     .vc-token-account-submit:disabled { cursor:wait; opacity:.68; }
-                    @media (max-width:640px) { .vc-token-account-form { min-height:0; } .vc-token-account-submit { min-height:44px; } }
+                    @media (max-width:640px) { .vc-token-account-form { min-height:0; } .vc-token-account-actions { margin-top:4px; } .vc-token-account-submit { min-height:44px; } }
                 </style>
                 <div id="${data.form_id}" class="vc-token-account-form" data-vc-token-form>
                     <label>
@@ -1344,7 +1344,7 @@ def vc_manager_farm_script():
 
     VC_UI_JS = """
     (function() {
-        const uiVersion = 'vc-manager-ui-v9';
+        const uiVersion = 'vc-manager-ui-v10';
         if (
             window.VCManagerUIVersion === uiVersion &&
             (window.VCManagerLayoutObserver || window.VCManagerLayoutTimer)
@@ -1426,7 +1426,7 @@ def vc_manager_farm_script():
 
         const participantPager = window.VCParticipantPager || { states: {} };
         participantPager.states = participantPager.states || {};
-        participantPager.pageSize = 5;
+        participantPager.pageSize = 4;
         participantPager.update = function(pagerId, rows) {
             const previous = this.states[pagerId] || { page: 0 };
             const nextRows = Array.isArray(rows) ? rows : [];
@@ -1699,7 +1699,7 @@ def vc_manager_farm_script():
                 const leaveButton = document.createElement('button');
                 leaveButton.type = 'button';
                 leaveButton.textContent = 'Leave';
-                leaveButton.disabled = item.removable === false || !item.connected;
+                leaveButton.disabled = item.removable === false || (!item.connected && !item.pending);
                 leaveButton.style.cssText = 'border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;min-width:72px;';
                 leaveButton.style.opacity = leaveButton.disabled ? '0.45' : '1';
                 leaveButton.style.cursor = leaveButton.disabled ? 'not-allowed' : 'pointer';
@@ -2344,7 +2344,7 @@ def vc_manager_farm_script():
                     total_seconds = float(data.get("total_vc_time_seconds", 0.0))
                     base["total_vc_time_seconds"] = total_seconds if math.isfinite(total_seconds) and total_seconds >= 0 else 0.0
                     sessions = data.get("sessions", [])
-                    base["sessions"] = [item for item in sessions if isinstance(item, dict)][-500:] if isinstance(sessions, list) else []
+                    base["sessions"] = [item for item in sessions if isinstance(item, dict)] if isinstance(sessions, list) else []
                     if isinstance(data.get("settings"), dict):
                         stored_settings = dict(data["settings"])
                         stored_slash = stored_settings.pop("slash_responses", None)
@@ -3515,22 +3515,21 @@ def vc_manager_farm_script():
         async def join_vc(self, guild_id, channel_id, mute=False, deaf=False, stream=False, video=False):
             if not await self.start_gateway():
                 return False
-            for _ in range(120):
+            for _ in range(300):
                 if self.user_id and self.ws and not self.ws.closed:
                     break
                 if self.status == "Token rejected" or (self.ws and self.ws.closed):
                     break
                 await asyncio.sleep(0.1)
 
-            if not self.user_id and not self.last_error:
-                self._set_status(
-                    "Login timed out",
-                    "Discord did not finish signing this account in. Check the token, account verification, VPN, and firewall."
-                )
-
             if not self.ws or self.ws.closed or not self.user_id:
                 if not self.last_error:
-                    self._set_status("Login failed", "The account gateway closed before Discord confirmed the login. Add the account again with a fresh token.")
+                    self._set_status(
+                        "Signing in" if self._gateway_transport_alive() else "Login failed",
+                        "Discord has not confirmed this account yet. Try Join again shortly."
+                        if self._gateway_transport_alive() else
+                        "The account gateway closed before Discord confirmed the login. Check the account in Discord.",
+                    )
                 return False
 
             if not any(
@@ -3590,7 +3589,9 @@ def vc_manager_farm_script():
                 return False
 
             # Discord may delay VOICE_STATE_UPDATE when several tokens connect.
-            for _ in range(60):
+            for _ in range(150):
+                if self.desired_channel_id != str(channel_id):
+                    return False
                 if self.is_in_vc and self.current_channel_id == str(channel_id):
                     if self.is_streaming:
                         try:
@@ -3626,18 +3627,39 @@ def vc_manager_farm_script():
                     break
                 await asyncio.sleep(0.2)
 
+            if self.desired_channel_id != str(channel_id):
+                return False
             access_error = await self._channel_access_error(channel_id)
-            self.clear_desired_voice()
-            self.current_channel_id = None
-            self.current_guild_id = None
-            self.is_in_vc = False
-            self._set_status(
-                "Join failed",
-                access_error or (
-                    "Discord did not confirm the join. Check that this account is in the server, can view the channel, "
-                    "has Connect permission, is not timed out, and does not need phone or email verification."
-                )
+            if access_error:
+                if self._terminal_failure or access_error.startswith((
+                    "This account cannot access", "This account is not allowed",
+                    "Discord requires email", "Discord rejected this token",
+                )):
+                    self.clear_desired_voice()
+                    self._set_status("Join blocked", access_error)
+                    return False
+                self._set_status("Join pending", f"{access_error} VC Manager will retry unless you press Leave.")
+                self._schedule_voice_restore(5)
+                return False
+            # A delayed voice event is not a rejection. Keep the requested
+            # destination so the watchdog can finish the join after this call.
+            saved = update_saved_token(
+                self.record_id,
+                preferred_guild_id=str(guild_id),
+                preferred_channel_id=str(channel_id),
+                stay_connected=True,
+                muted=self.desired_muted,
+                deafened=self.desired_deafened,
+                streaming=self.desired_streaming,
+                camera_on=self.desired_camera,
             )
+            self._set_status(
+                "Join pending",
+                "Discord has not confirmed the voice join yet. VC Manager will keep trying unless you press Leave."
+                if saved else
+                "Discord has not confirmed the voice join yet. VC Manager will retry while Nighty stays open, but could not save this destination for a restart.",
+            )
+            self._schedule_voice_restore(5)
             return False
 
         async def set_voice_controls(self, mute=None, deaf=None, stream=None, video=None):
@@ -3737,17 +3759,19 @@ def vc_manager_farm_script():
             return True
 
         async def leave_vc(self):
+            was_pending = bool(self.desired_channel_id)
+            leave_guild_id = self.current_guild_id or self.desired_guild_id
             self.clear_desired_voice()
             update_saved_token(self.record_id, stay_connected=False)
-            if not self.current_guild_id or not self.ws or self.ws.closed:
+            if not leave_guild_id or not self.ws or self.ws.closed:
                 if self.user_id:
                     self._set_status("Ready")
-                return False
+                return was_pending
             try:
                 await self.ws.send_json({
                     "op": 4,
                     "d": {
-                        "guild_id": str(self.current_guild_id),
+                        "guild_id": str(leave_guild_id),
                         "channel_id": None,
                         "self_mute": False,
                         "self_deaf": False,
@@ -3846,10 +3870,7 @@ def vc_manager_farm_script():
             if tid not in current_ids:
                 safe_create_task(token_clients[tid].close())
                 del token_clients[tid]
-        if data_changed:
-            save_tokens(data)
-
-        if not save_tokens(data):
+        if data_changed and not save_tokens(data):
             print("[VC Manager] Managed account IDs could not be saved. Existing token data was not replaced.", type_="ERROR")
 
     # ==================== VOICE STATE HELPERS ====================
@@ -4020,14 +4041,22 @@ def vc_manager_farm_script():
         else:
             return f"{secs}s"
 
-    def format_session_time(value):
+    def format_session_time(value, style="F"):
         if not value:
             return "Unknown"
         try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            return parsed.strftime("%b %d, %Y %I:%M:%S %p")
+            parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")
+            )
+            return f"<t:{int(parsed.timestamp())}:{style}>"
         except (TypeError, ValueError):
             return str(value)
+
+    def format_channel_name(name):
+        channel = "#" + str(name or "?").replace("\r", " ").replace("\n", " ")
+        longest_ticks = max((len(run) for run in re.findall(r"`+", channel)), default=0)
+        fence = "`" * (longest_ticks + 1)
+        return f"{fence}{channel}{fence}"
 
     def record_session(channel, started_at):
         if not channel or not started_at:
@@ -4046,7 +4075,6 @@ def vc_manager_farm_script():
             "duration_seconds": duration,
             "reason": "Left",
         })
-        data["sessions"] = data["sessions"][-500:]
         save_data(data)
 
     def get_primary_session_history(include_live=True):
@@ -4516,6 +4544,14 @@ def vc_manager_farm_script():
     except NameError:
         slash_bot_app = None
 
+    if slash_bot_app and isinstance(previous_runtime, dict):
+        for event_name, previous_listener in previous_runtime.get("app_listeners", ()):
+            try:
+                slash_bot_app.remove_listener(previous_listener, event_name)
+            except Exception as error:
+                print(f"[VC Manager] Could not remove a stale slash listener: {error}", type_="ERROR")
+    runtime_state["app_listeners"] = []
+
     COMPONENTS_V2_FLAG = 1 << 15
     EPHEMERAL_FLAG = 1 << 6
 
@@ -4564,7 +4600,7 @@ def vc_manager_farm_script():
             if toggle:
                 toggle.checked = bool(settings.get(setting_key, True))
 
-    def slash_theme_layout(content):
+    def slash_theme_layout(content, footer=None):
         """Build Discord Components V2 using nes's Nighty V2 theme schema."""
         def limited_text(value):
             value = str(value or "")
@@ -4626,6 +4662,11 @@ def vc_manager_farm_script():
             children.insert(0, {"type": 10, "content": content})
         if not children:
             children = [{"type": 10, "content": content}]
+        if footer is not None:
+            children = children[:37] + [
+                {"type": 14, "divider": True, "spacing": 1},
+                {"type": 10, "content": limited_text(footer)},
+            ]
         return [{"type": 17, "accent_color": accent_color, "components": children[:39]}]
 
     class VCSlashContext:
@@ -4651,7 +4692,7 @@ def vc_manager_farm_script():
                 return await followup.send(content=content[:2000], ephemeral=ephemeral)
             return None
 
-        async def send_v2(self, title, description, ephemeral=None):
+        async def send_v2(self, title, description, ephemeral=None, footer=None):
             if ephemeral is None:
                 ephemeral = get_slash_response_settings()["ephemeral"]
             content = f"## {title}\n{description}" if title else description
@@ -4662,7 +4703,7 @@ def vc_manager_farm_script():
                     "type": 4,
                     "data": {
                         "flags": COMPONENTS_V2_FLAG | (EPHEMERAL_FLAG if ephemeral else 0),
-                        "components": slash_theme_layout(content),
+                        "components": slash_theme_layout(content, footer=footer),
                         "allowed_mentions": {"parse": []}
                     }
                 }
@@ -4679,7 +4720,8 @@ def vc_manager_farm_script():
                             print(f"[VC Manager] Components V2 response rejected ({response.status}): {detail}", type_="ERROR")
                 except Exception as e:
                     print(f"[VC Manager] Components V2 response failed: {e}", type_="ERROR")
-            await self._fallback_embed(title, description, ephemeral=ephemeral)
+            fallback_description = description if footer is None else f"{description}\n\n{footer}"
+            await self._fallback_embed(title, fallback_description, ephemeral=ephemeral)
             self._done = True
             return False
 
@@ -4917,9 +4959,9 @@ def vc_manager_farm_script():
             target = find_voice_channel(channel, getattr(ctx.interaction, "guild", None))
             if not target or not getattr(target, "guild", None):
                 return await ctx.error(f"Could not find voice channel `{channel}`.")
-            await ctx.send_v2("VC Manager", f"Connecting to **#{target.name}** in **{target.guild.name}**...")
+            await ctx.send_v2("VC Manager", f"Connecting to {format_channel_name(target.name)} in **{target.guild.name}**...")
             if await connect(target.guild.id, target.id):
-                await ctx.edit_v2("Connected", f"VC Manager joined **#{target.name}** in **{target.guild.name}**.")
+                await ctx.edit_v2("Connected", f"VC Manager joined {format_channel_name(target.name)} in **{target.guild.name}**.")
             else:
                 await ctx.edit_v2("Connection Failed", "Discord rejected the voice join request.")
 
@@ -4938,7 +4980,7 @@ def vc_manager_farm_script():
             if not target or not guild:
                 return await ctx.error(f"Could not find voice channel `{channel_id}`.")
 
-            await ctx.send_v2("VC Manager", f"Loading **#{target.name}** with all voice controls...")
+            await ctx.send_v2("VC Manager", f"Loading {format_channel_name(target.name)} with all voice controls...")
             old_state = (is_muted, is_deafened, is_streaming, is_camera_on)
             is_muted = is_deafened = is_streaming = is_camera_on = True
             intentional_disconnect = False
@@ -4986,16 +5028,16 @@ def vc_manager_farm_script():
                 )
 
             if not joined:
-                await ctx.edit_v2("Connection Failed", f"Discord did not confirm **#{target.name}**.")
+                await ctx.edit_v2("Connection Failed", f"Discord did not confirm {format_channel_name(target.name)}.")
             elif stream_started:
                 await ctx.edit_v2(
                     "Voice Channel Loaded",
-                    f"Joined **#{target.name}** with mute, deafen, stream, and camera enabled."
+                    f"Joined {format_channel_name(target.name)} with mute, deafen, stream, and camera enabled."
                 )
             else:
                 await ctx.edit_v2(
                     "Voice Channel Loaded",
-                    f"Joined **#{target.name}** with mute, deafen, and camera. Discord rejected screen share."
+                    f"Joined {format_channel_name(target.name)} with mute, deafen, and camera. Discord rejected screen share."
                 )
 
         @vc_group.command(name="leave", description="Disconnect the VC Manager voice session")
@@ -5076,25 +5118,41 @@ def vc_manager_farm_script():
             members = list(getattr(current, "members", []))
             names = "\n".join(f"- {getattr(member, 'display_name', member.name)}" for member in members)
             await ctx.send_v2(
-                f"#{current.name}",
+                format_channel_name(current.name),
                 f"**Participants:** {len(members)}\n{names or 'No active users'}"
             )
 
-        @vc_group.command(name="history", description="Show recent VC Manager sessions")
-        async def slash_vc_history(ctx):
+        def history_page(page):
+            sessions = get_primary_session_history(include_live=True)
+            if not sessions:
+                return "No voice sessions.", None
+            page_size = 5
+            total_pages = max(1, math.ceil(len(sessions) / page_size))
+            page = min(max(int(page), 1), total_pages)
+            page_sessions = list(reversed(sessions))[(page - 1) * page_size:page * page_size]
+            lines = [
+                f"{format_channel_name(session.get('channel_name', '?'))} in **{session.get('guild_name', '?')}**\n"
+                f"**Joined:** {format_session_time(session.get('start_time'))}\n"
+                f"**Left:** {format_session_time(session.get('end_time') or session.get('timestamp')) if (session.get('end_time') or session.get('timestamp')) else 'Still connected'}\n"
+                f"**Duration:** {format_duration(session.get('duration_seconds', 0))}"
+                for session in page_sessions
+            ]
+            content = "\n\n".join(lines)
+            footer = f"**Page:** {page} / {total_pages}  |  **Sessions:** {len(sessions)}"
+            if total_pages > 1:
+                footer += "\nUse `/vc history page:<number>` to change pages."
+            return content, footer
+
+        @vc_group.command(
+            name="history",
+            description="Browse saved VC Manager sessions",
+            describe={"page": "History page number, starting at 1"},
+        )
+        async def slash_vc_history(ctx, page: int = 1):
             if not await slash_owner_only(ctx):
                 return
-            sessions = get_primary_session_history(include_live=True)[-5:]
-            if not sessions:
-                return await ctx.send_v2("Session History", "No voice sessions.")
-            lines = [
-                f"**#{session.get('channel_name', '?')}** in **{session.get('guild_name', '?')}**\n"
-                f"Joined: {format_session_time(session.get('start_time'))}\n"
-                f"Left: {format_session_time(session.get('end_time') or session.get('timestamp')) if (session.get('end_time') or session.get('timestamp')) else 'Still connected'}\n"
-                f"Duration: {format_duration(session.get('duration_seconds', 0))}"
-                for session in reversed(sessions)
-            ]
-            await ctx.send_v2("Recent Voice Sessions", "\n\n".join(lines))
+            content, footer = history_page(page)
+            await ctx.send_v2("Voice Session History", content, footer=footer)
 
         @vc_group.command(name="status", description="Show the managed voice connection state")
         async def slash_vc_status(ctx):
@@ -5111,13 +5169,14 @@ def vc_manager_farm_script():
             if not slash_settings["detailed_status"]:
                 return await ctx.send_v2(
                     "VC Manager Status",
-                    f"**State:** Connected\n**Channel:** #{current.name}"
+                    f"**State:** Connected\n**Channel:** {format_channel_name(current.name)}"
                 )
             await ctx.send_v2(
                 "VC Manager Status",
                 f"**State:** Connected\n**Server:** {current.guild.name}\n"
-                f"**Channel:** #{current.name}\n**Channel ID:** `{current.id}`\n"
-                f"**Session:** {format_duration(session_seconds)}"
+                f"**Channel:** {format_channel_name(current.name)}\n**Channel ID:** `{current.id}`\n"
+                f"**Session:** {format_duration(session_seconds)}\n"
+                f"**Started:** {format_session_time(connection_start_time, 'R')}"
             )
 
         @vc_group.command(name="stats", description="Show tracked VC Manager voice statistics")
@@ -5162,14 +5221,19 @@ def vc_manager_farm_script():
             })
             connected_accounts = sum(client.is_in_vc for client in token_clients.values())
             current_text = (
-                f"#{current.name} in {current.guild.name}"
+                f"{format_channel_name(current.name)} in {current.guild.name}"
                 if current else "Disconnected"
+            )
+            started_text = (
+                f"**Started:** {format_session_time(connection_start_time, 'R')}\n"
+                if current and connection_start_time else ""
             )
 
             await ctx.send_v2(
                 "VC Manager Statistics",
                 f"**Total voice time:** {format_duration(total_seconds)}\n"
                 f"**Current session:** {format_duration(live_seconds)}\n"
+                f"{started_text}"
                 f"**Current channel:** {current_text}\n"
                 f"**Completed sessions:** {len(completed_durations)}\n"
                 f"**Longest session:** {format_duration(longest_seconds)}\n"
@@ -5237,7 +5301,7 @@ def vc_manager_farm_script():
                 "`/vc stream state:<enable|disable>`: Set screen share\n"
                 "`/vc camera state:<enable|disable>`: Set the camera state\n"
                 "`/vc list`: List channel participants\n"
-                "`/vc history`: Show recent sessions\n"
+                "`/vc history page:<number>`: Browse saved sessions\n"
                 "`/vc status`: Show connection details\n"
                 "`/vc stats`: Show tracked voice usage statistics\n"
                 "`/vc settings`: View or update response settings"
@@ -5817,6 +5881,7 @@ def vc_manager_farm_script():
                 "status": status_text,
                 "error": error_text,
                 "connected": in_vc,
+                "pending": bool(client and client.desired_channel_id and not in_vc),
                 "muted": bool(client.is_muted) if client else False,
                 "deafened": bool(client.is_deafened) if client else False,
                 "streaming": bool(client.is_streaming) if client else False,
@@ -6564,22 +6629,19 @@ def vc_manager_farm_script():
             token_clients[new_id] = client
             started = await client.start_gateway()
             if started:
-                for _ in range(120):
+                for _ in range(80):
                     if client.user_id and client.ws and not client.ws.closed:
                         break
                     if client.status == "Token rejected" or (client.ws and client.ws.closed):
                         break
                     await asyncio.sleep(0.1)
-                if not client.user_id and not client.last_error:
-                    client._set_status(
-                        "Login timed out",
-                        "Discord did not finish signing this account in. Check the token, account verification, VPN, and firewall."
-                    )
 
             refresh_destination_account_items(preserve_selection=True)
             update_token_table_rows()
             if client.user_id:
                 tab.toast("Account added", f"{name} signed in and can join voice channels.", "SUCCESS")
+            elif client._gateway_transport_alive() and not client._terminal_failure:
+                tab.toast("Account saved", f"{name} is still signing in. Its status will update when Discord responds.", "INFO")
             else:
                 tab.toast(
                     "Account saved, login failed",
@@ -6716,9 +6778,9 @@ def vc_manager_farm_script():
     async def handle_disc_all_tokens():
         disc_all_btn.loading = True
         try:
-            connected_clients = [client for client in token_clients.values() if client.is_in_vc]
+            connected_clients = [client for client in token_clients.values() if client.is_in_vc or client.desired_channel_id]
             if not connected_clients:
-                tab.toast("Nothing to disconnect", "No managed account is connected to a voice channel.", "ERROR")
+                tab.toast("Nothing to disconnect", "No managed account is connected or waiting to join.", "ERROR")
                 return
             results = await asyncio.gather(
                 *(client.leave_vc() for client in connected_clients),
@@ -6886,7 +6948,7 @@ def vc_manager_farm_script():
                     requested_action == "connection" and client.is_in_vc
                 )
                 if should_leave:
-                    if not client.is_in_vc:
+                    if not client.is_in_vc and not client.desired_channel_id:
                         tab.toast("Account is not connected", f"{client.name} is already out of voice.", "ERROR")
                         return
                     if await client.leave_vc():
