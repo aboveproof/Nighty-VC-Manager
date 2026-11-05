@@ -2355,9 +2355,7 @@ def vc_manager_farm_script():
             return fresh_data()
         except Exception as e:
             print(f"[VC Manager] Error loading data: {e}", type_="ERROR")
-            backup_path = backup_broken_file(VC_DATA_PATH)
-            if backup_path:
-                print(f"[VC Manager] Preserved the broken data file as {backup_path.name}.", type_="INFO")
+            backup_broken_file(VC_DATA_PATH)
             return fresh_data()
 
     def write_json_file(path, data, label):
@@ -4386,7 +4384,6 @@ def vc_manager_farm_script():
             try:
                 await asyncio.sleep(float(minutes) * 60)
                 if is_actually_connected():
-                    print("[VC Manager] Auto-disconnect timer expired", type_="INFO")
                     await disconnect_from_voice(intentional=True)
             except asyncio.CancelledError:
                 pass
@@ -4438,7 +4435,6 @@ def vc_manager_farm_script():
 
                 # Auto reconnect check
                 if not intentional_disconnect and is_auto_reconnect and reconnect_target:
-                    print(f"[VC Manager] Unexpected drop from {reconnect_target['channel_name']}. Reconnecting in 3s...", type_="INFO")
                     async def reconnect_later():
                         await asyncio.sleep(3)
                         if not is_actually_connected() and reconnect_target:
@@ -4503,7 +4499,6 @@ def vc_manager_farm_script():
         if is_auto_follow and follow_target_id and str(member.id) == str(follow_target_id):
             target_channel = getattr(after, "channel", None) if after else None
             if target_channel and (not cur or target_channel.id != cur.id):
-                print(f"[VC Manager] Auto-following target {member.name} to #{target_channel.name}", type_="INFO")
                 await connect(target_channel.guild.id, target_channel.id)
                 return
 
@@ -4517,7 +4512,6 @@ def vc_manager_farm_script():
                 if m.id != bot_user.id and not getattr(m, "bot", False)
             ]
             if not other_people:
-                print(f"[VC Manager] Alone in #{cur.name}, disconnecting...", type_="INFO")
                 await disconnect_from_voice(intentional=True)
                 return
 
@@ -4620,10 +4614,14 @@ def vc_manager_farm_script():
             v2 = {"color": theme_data.get("color", "#5865F2"), "layout": [{"text": "{content}"}]}
 
         color_value = v2.get("color", theme_data.get("color", "#5865F2"))
-        try:
-            accent_color = int(str(color_value).lstrip("#"), 16)
-        except (TypeError, ValueError):
-            accent_color = 0x5865F2
+        no_accent_color = color_value is None or str(color_value).strip().lower() in {
+            "", "0", "#000000", "000000", "black"
+        }
+        if not no_accent_color:
+            try:
+                accent_color = int(str(color_value).lstrip("#"), 16)
+            except (TypeError, ValueError):
+                accent_color = 0x5865F2
 
         children = []
         injected = False
@@ -4667,7 +4665,10 @@ def vc_manager_farm_script():
                 {"type": 14, "divider": True, "spacing": 1},
                 {"type": 10, "content": limited_text(footer)},
             ]
-        return [{"type": 17, "accent_color": accent_color, "components": children[:39]}]
+        container = {"type": 17, "components": children[:39]}
+        if not no_accent_color:
+            container["accent_color"] = accent_color
+        return [container]
 
     class VCSlashContext:
         """Slash API context with native Components V2 response support."""
@@ -4864,7 +4865,7 @@ def vc_manager_farm_script():
                     current = self.fingerprint()
                     previous = (state.get(self.label) or {}).get("fingerprint")
                     if previous != current or not self._session_synced:
-                        synced = await self._tree.sync()
+                        await self._tree.sync()
                         self._session_synced = True
                         state[self.label] = {
                             "fingerprint": current,
@@ -4872,9 +4873,6 @@ def vc_manager_farm_script():
                         }
                         with open(self._state_path, "w", encoding="utf-8") as file:
                             json.dump(state, file, indent=2)
-                        print(f"[VC Manager Slash] Synced {len(synced)} command(s).", type_="SUCCESS")
-                    else:
-                        print("[VC Manager Slash] Slash definitions already synced.", type_="INFO")
                 except Exception as e:
                     print(f"[VC Manager Slash] Auto-sync failed: {e}", type_="ERROR")
 
@@ -6670,7 +6668,7 @@ def vc_manager_farm_script():
             join_clients = []
             failures = []
             for token_id, client in clients:
-                guild_id, channel_id, destination_source = resolve_token_join_destination(token_id)
+                guild_id, channel_id, _ = resolve_token_join_destination(token_id)
                 if not guild_id or not channel_id:
                     failures.append((
                         client.name,
@@ -6678,11 +6676,6 @@ def vc_manager_farm_script():
                         "No active or saved managed destination is available.",
                     ))
                     continue
-                print(
-                    f"[VC Manager] Join All selected guild {guild_id}, channel {channel_id} "
-                    f"for {client.name} (record {str(token_id)[:8]}) using {destination_source}.",
-                    type_="INFO",
-                )
                 join_clients.append(client)
                 join_jobs.append(client.join_vc(
                     guild_id,
@@ -6863,10 +6856,6 @@ def vc_manager_farm_script():
             print("[VC Manager] Managed Accounts sent an action without an account ID.", type_="ERROR")
             tab.toast("Account action failed", "Refresh the VC Manager page and try again.", "ERROR")
             return
-        print(
-            f"[VC Manager] Managed account action '{action}' received for record {row_id[:8]}.",
-            type_="INFO",
-        )
         if action == "account":
             handle_token_connection(row_id, "connection")
             return
@@ -6969,7 +6958,7 @@ def vc_manager_farm_script():
                     tab.toast("Account is already connected", f"{client.name} is already in voice.", "ERROR")
                     return
 
-                target_guild_id, target_channel_id, destination_source = resolve_token_join_destination(row_id_str)
+                target_guild_id, target_channel_id, _ = resolve_token_join_destination(row_id_str)
                 if not target_guild_id or not target_channel_id:
                     client._set_status(
                         "Destination required",
@@ -6979,11 +6968,6 @@ def vc_manager_farm_script():
                     tab.toast("Destination required", client.last_error, "ERROR")
                     return
 
-                print(
-                    f"[VC Manager] Joining {client.name} (record {row_id_str[:8]}) "
-                    f"to guild {target_guild_id}, channel {target_channel_id} using {destination_source}.",
-                    type_="INFO",
-                )
                 joined = await client.join_vc(
                     target_guild_id,
                     target_channel_id,
@@ -6998,10 +6982,6 @@ def vc_manager_farm_script():
                         if str(channel_item.get("id")) == target_channel_id:
                             channel_name = channel_item.get("name") or target_channel_id
                             break
-                    print(
-                        f"[VC Manager] {client.name} joined guild {target_guild_id}, channel {target_channel_id}.",
-                        type_="INFO",
-                    )
                     if client.last_error:
                         tab.toast("Account connected, destination not saved", client.last_error, "ERROR")
                     else:
@@ -7207,17 +7187,12 @@ def vc_manager_farm_script():
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.get(VERSION_SOURCE_URL) as response:
                     if response.status != 200:
-                        print(
-                            f"[VC Manager] Update check returned HTTP {response.status}. The script will keep running.",
-                            type_="INFO",
-                        )
                         return
                     source = await response.text()
             match = re.search(r'^\s*SCRIPT_VERSION\s*=\s*["\']([^"\']+)["\']', source, re.MULTILINE)
             if not match:
                 match = re.search(r'name\s*=\s*["\']VC Manager v([^"\']+)["\']', source)
             if not match:
-                print("[VC Manager] The update check could not read the repository version.", type_="INFO")
                 return
             latest_version = match.group(1).strip()
             if version_tuple(latest_version) <= version_tuple(SCRIPT_VERSION):
@@ -7229,11 +7204,8 @@ def vc_manager_farm_script():
             )
         except asyncio.CancelledError:
             raise
-        except Exception as error:
-            print(
-                f"[VC Manager] Update check failed: {type(error).__name__}: {error}. The script will keep running.",
-                type_="INFO",
-            )
+        except Exception:
+            return
 
     async def startup_sync():
         await asyncio.sleep(0.02)
