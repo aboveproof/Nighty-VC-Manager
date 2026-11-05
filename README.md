@@ -4,7 +4,7 @@
 
 Voice controls, session tracking, automation, slash commands, and multi-account connections for Nighty.
 
-[![Version](https://img.shields.io/badge/version-4.3.2-5865F2?style=flat-square)](./VCManager.py)
+[![Version](https://img.shields.io/badge/version-4.4.0-5865F2?style=flat-square)](./VCManager.py)
 [![NightyScript](https://img.shields.io/badge/NightyScript-5.0-111827?style=flat-square)](https://github.com/aboveproof/nighty-docs)
 [![Python](https://img.shields.io/badge/Python-3.x-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE)
@@ -43,9 +43,11 @@ The stream and camera controls update Discord voice-state flags. Actual media be
 
 ### Channel information
 
-- Fixed-height participant list with up to five users per page
+- Fixed-height participant list with four users per page
 - Compact participant IDs
 - Active voice flags shown as `Mute | Deaf | Stream | Camera`
+- Clickable participant profiles with banners, decorations, badges, server tags, pronouns, roles, connections, and shared voice history
+- Discord markdown and custom emoji rendering in participant bios
 - Channel telemetry for bitrate, region, user limit, occupancy, and channel ID
 - Voice-channel status editor with permission checks
 - Session history with a clear-history action

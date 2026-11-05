@@ -3,7 +3,7 @@
 # Voice controls, session data, and multi-token account management for Nighty
 
 @nightyScript(
-    name="VC Manager v4.3.2",
+    name="VC Manager v4.4.0",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
     usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
@@ -78,7 +78,7 @@ def vc_manager_farm_script():
 
     import aiohttp
 
-    SCRIPT_VERSION = "4.3.2"
+    SCRIPT_VERSION = "4.4.0"
     PROJECT_URL = "https://github.com/aboveproof/Nighty-VC-Manager"
     VERSION_SOURCE_URL = (
         "https://raw.githubusercontent.com/aboveproof/Nighty-VC-Manager/main/VCManager.py"
@@ -92,6 +92,7 @@ def vc_manager_farm_script():
     previous_token_states = {}
     previous_managed_target = None
     previous_connection_start_time = None
+    previous_participant_sessions = {}
     if isinstance(previous_runtime, dict):
         previous_clients_by_id = previous_runtime.get("token_clients", {})
         if isinstance(previous_clients_by_id, dict):
@@ -117,6 +118,9 @@ def vc_manager_farm_script():
         saved_start_time = previous_runtime.get("connection_start_time")
         if isinstance(saved_start_time, datetime):
             previous_connection_start_time = saved_start_time
+        saved_participant_sessions = previous_runtime.get("participant_sessions")
+        if isinstance(saved_participant_sessions, dict):
+            previous_participant_sessions = dict(saved_participant_sessions)
         for event_name, previous_listener in previous_runtime.get("listeners", ()):
             try:
                 bot.remove_listener(previous_listener, event_name)
@@ -158,6 +162,7 @@ def vc_manager_farm_script():
         "token_clients": {},
         "managed_target": previous_managed_target,
         "connection_start_time": previous_connection_start_time,
+        "participant_sessions": previous_participant_sessions,
         "listeners": [],
         "backed_up_files": set(),
         "generation": uuid.uuid4().hex
@@ -915,9 +920,10 @@ def vc_manager_farm_script():
 
     @cui_new(type="element")
     class ParticipantPager:
-        _init_params = ["self", "pager_id"]
+        _init_params = ["self", "pager_id", "on_select"]
 
-        def __init__(self, pager_id=None):
+        def __init__(self, pager_id=None, on_select=None):
+            self.funcs = [on_select]
             self.html = """
                 <div id="${data.pager_id}" class="vc-participant-pager" style="display: flex; flex: 1 1 auto; min-height: 0; width: 100%;">
                     <div data-participant-controls style="position: absolute; top: 16px; right: 16px; display: flex; align-items: center; gap: 8px; background: rgba(30, 30, 30, 0.7); backdrop-filter: blur(4px); padding: 4px 8px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1); z-index: 10;">
@@ -925,6 +931,7 @@ def vc_manager_farm_script():
                         <button type="button" data-participant-prev onclick="window.VCParticipantPager.move('${data.pager_id}', -1)" style="background: none; border: none; cursor: pointer; font-size: 24px; padding: 0 5px; line-height: 1;">&lsaquo;</button>
                         <button type="button" data-participant-next onclick="window.VCParticipantPager.move('${data.pager_id}', 1)" style="background: none; border: none; cursor: pointer; font-size: 24px; padding: 0 5px; line-height: 1;">&rsaquo;</button>
                     </div>
+                    <button type="button" data-participant-select-proxy onclick="${on_select}" style="display:none;"></button>
                     <div style="display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; width: 100%; padding: 12px; background: rgba(255,255,255,0.035); border-radius: 10px;">
                         <div style="display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 12px; padding: 10px 12px; background: rgba(255,255,255,0.07); border-radius: 8px; font-weight: 700;">
                             <span>Participant</span>
@@ -1446,6 +1453,15 @@ def vc_manager_farm_script():
             this.states[pagerId] = state;
             this.render(pagerId);
         };
+        participantPager.select = function(pagerId, userId) {
+            const root = document.getElementById(pagerId);
+            const proxy = root && root.querySelector('[data-participant-select-proxy]');
+            if (!proxy || !userId) return;
+            const payload = JSON.stringify({ id: String(userId) });
+            proxy.value = payload;
+            proxy.setAttribute('value', payload);
+            proxy.click();
+        };
         participantPager.render = function(pagerId) {
             const root = document.getElementById(pagerId);
             if (!root) return;
@@ -1482,8 +1498,22 @@ def vc_manager_farm_script():
 
             pageRows.forEach(item => {
                 const row = document.createElement('div');
-                row.className = 'vc-managed-row';
-                row.style.cssText = 'display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:12px;align-items:center;min-height:86px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);box-sizing:border-box;';
+                row.className = 'vc-participant-row';
+                row.tabIndex = 0;
+                row.setAttribute('role', 'button');
+                row.setAttribute('aria-label', `Open ${item.name || 'participant'} profile`);
+                row.style.cssText = 'display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:12px;align-items:center;min-height:86px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);border-radius:8px;box-sizing:border-box;cursor:pointer;transition:background-color .16s ease,transform .16s ease;outline:none;';
+                row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,.055)'; });
+                row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+                row.addEventListener('focus', () => { row.style.background = 'rgba(255,255,255,.07)'; row.style.boxShadow = '0 0 0 2px rgba(88,101,242,.55) inset'; });
+                row.addEventListener('blur', () => { row.style.background = 'transparent'; row.style.boxShadow = 'none'; });
+                row.addEventListener('click', () => this.select(pagerId, item.id));
+                row.addEventListener('keydown', event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        this.select(pagerId, item.id);
+                    }
+                });
 
                 const identity = document.createElement('div');
                 identity.style.cssText = 'display:flex;align-items:center;gap:10px;min-width:0;';
@@ -2248,6 +2278,102 @@ def vc_manager_farm_script():
         def remove_js(self):
             return "element.style.opacity = '0';"
 
+    @cui_new(type="callable", name="ParticipantProfileModal")
+    class ParticipantProfileModal:
+        _init_params = ["self", "profile_json", "onClose"]
+
+        def __init__(self, profile_json="{}", onClose=None):
+            self.html = """
+            <div style="position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:20px;background:rgba(0,0,0,.76);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)">
+            <style>
+                .vc-profile-card{--profile-accent:#5865f2;position:relative;width:min(600px,94vw);max-height:min(860px,92vh);overflow:hidden;border:1px solid rgba(255,255,255,.14);border-radius:18px;background:#111214;color:#f2f3f5;box-shadow:0 28px 80px rgba(0,0,0,.62);font-family:inherit}
+                .vc-profile-scroll{max-height:min(860px,92vh);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+                .vc-profile-banner{position:relative;height:150px;overflow:hidden;background:linear-gradient(125deg,var(--profile-accent),#232428 78%);background-position:center;background-size:cover}
+                .vc-profile-effect{position:absolute;inset:-40%;pointer-events:none;opacity:.72;background:conic-gradient(from 20deg,transparent 0 25%,rgba(255,255,255,.18),transparent 48% 72%,rgba(88,101,242,.5),transparent);animation:vc-profile-spin 9s linear infinite;mix-blend-mode:screen}
+                @keyframes vc-profile-spin{to{transform:rotate(360deg)}}
+                .vc-profile-close{position:absolute;top:14px;right:14px;z-index:8;width:34px;height:34px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.18);border-radius:50%;background:rgba(15,16,18,.72);color:#fff;cursor:pointer;font:600 18px/1 inherit;backdrop-filter:blur(4px)}
+                .vc-profile-head{position:relative;padding:0 22px 18px}.vc-profile-avatar-wrap{position:relative;width:104px;height:104px;margin-top:-52px;z-index:3}
+                .vc-profile-avatar{width:92px;height:92px;margin:6px;border:6px solid #111214;border-radius:50%;box-sizing:border-box;object-fit:cover;background:#232428}
+                .vc-profile-decoration{position:absolute;inset:-4px;width:112px;height:112px;object-fit:contain;pointer-events:none}.vc-profile-status{position:absolute;right:11px;bottom:10px;width:18px;height:18px;border:4px solid #111214;border-radius:50%;background:#23a55a}
+                .vc-profile-identity{margin-top:10px;min-width:0}.vc-profile-name-line{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.vc-profile-display-name{margin:0;font-size:24px;line-height:1.2;font-weight:800;overflow-wrap:anywhere}.vc-profile-username{margin-top:3px;color:#b5bac1;font-size:14px;overflow-wrap:anywhere}
+                .vc-profile-tag{display:none;align-items:center;gap:5px;max-width:100%;padding:4px 8px;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:#232428;color:#dbdee1;font-size:12px;font-weight:700}.vc-profile-tag img{width:16px;height:16px;object-fit:contain}.vc-profile-pronouns{margin-top:8px;color:#dbdee1;font-size:13px}.vc-profile-badges{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin-top:10px}.vc-profile-badge{width:22px;height:22px;object-fit:contain}
+                .vc-profile-body{display:flex;flex-direction:column;gap:12px;padding:0 22px 22px}.vc-profile-section{padding:14px;border:1px solid rgba(255,255,255,.09);border-radius:12px;background:#1e1f22}.vc-profile-section-title{margin:0 0 9px;color:#f2f3f5;font-size:12px;line-height:1;font-weight:800;letter-spacing:.04em;text-transform:uppercase}.vc-profile-bio{margin:0;color:#dbdee1;font-size:14px;line-height:1.48;overflow-wrap:anywhere}.vc-profile-bio a{color:#00a8fc;text-decoration:none}.vc-profile-bio a:hover{text-decoration:underline}.vc-profile-bio code{padding:2px 5px;border-radius:4px;background:#111214;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.vc-profile-bio pre{max-width:100%;margin:8px 0;padding:10px;overflow-x:auto;border:1px solid rgba(255,255,255,.08);border-radius:7px;background:#111214;white-space:pre-wrap}.vc-profile-bio pre code{padding:0;background:transparent}.vc-profile-bio blockquote{margin:4px 0;padding-left:10px;border-left:3px solid #4e5058;color:#b5bac1}.vc-profile-bio .vc-custom-emoji{width:22px;height:22px;vertical-align:-6px;object-fit:contain}.vc-profile-bio .vc-markdown-spoiler{border-radius:3px;background:#111214;color:transparent;cursor:pointer;user-select:none}.vc-profile-bio .vc-markdown-spoiler.is-visible{background:rgba(255,255,255,.08);color:inherit;user-select:text}
+                .vc-profile-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.vc-profile-fact{min-width:0;padding:10px;border-radius:9px;background:#2b2d31}.vc-profile-fact-label{display:block;margin-bottom:4px;color:#949ba4;font-size:11px;font-weight:700;text-transform:uppercase}.vc-profile-fact-value{display:block;color:#f2f3f5;font-size:13px;line-height:1.35;overflow-wrap:anywhere}
+                .vc-profile-chips{display:flex;flex-wrap:wrap;gap:6px}.vc-profile-chip{max-width:100%;padding:5px 8px;border-radius:6px;background:#2b2d31;color:#dbdee1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.vc-profile-history{display:flex;flex-direction:column;gap:7px;max-height:270px;overflow-y:auto;padding-right:2px}.vc-profile-session{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:10px;border-radius:9px;background:#2b2d31}.vc-profile-session-main{min-width:0}.vc-profile-session-channel{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.vc-profile-session-meta{margin-top:4px;color:#b5bac1;font-size:11px;line-height:1.4}.vc-profile-session-duration{align-self:start;padding:3px 7px;border-radius:6px;background:#111214;font:700 11px/1.4 monospace;white-space:nowrap}.vc-profile-note{color:#b5bac1;font-size:12px;line-height:1.45}
+                @media(max-width:560px){.vc-profile-card{width:calc(100vw - 20px);max-height:90vh}.vc-profile-scroll{max-height:90vh}.vc-profile-banner{height:126px}.vc-profile-head,.vc-profile-body{padding-left:16px;padding-right:16px}.vc-profile-facts{grid-template-columns:minmax(0,1fr)}}
+                @media(prefers-reduced-motion:reduce){.vc-profile-effect{animation:none}}
+            </style>
+            <div class="vc-profile-card" data-vc-participant-profile role="dialog" aria-modal="true" aria-label="Participant profile">
+                <button class="vc-profile-close" type="button" aria-label="Close profile" onclick="${onClose}">&times;</button>
+                <div class="vc-profile-scroll">
+                    <div class="vc-profile-banner" data-profile-banner><div class="vc-profile-effect" data-profile-effect hidden></div></div>
+                    <div class="vc-profile-head">
+                        <div class="vc-profile-avatar-wrap"><img class="vc-profile-avatar" data-profile-avatar alt="User avatar"><img class="vc-profile-decoration" data-profile-decoration alt="" hidden><span class="vc-profile-status"></span></div>
+                        <div class="vc-profile-identity"><div class="vc-profile-name-line"><h2 class="vc-profile-display-name" data-profile-display-name>User</h2><span class="vc-profile-tag" data-profile-tag><img data-profile-tag-badge alt=""><span data-profile-tag-text></span></span></div><div class="vc-profile-username" data-profile-username></div><div class="vc-profile-pronouns" data-profile-pronouns hidden></div><div class="vc-profile-badges" data-profile-badges hidden></div></div>
+                    </div>
+                    <div class="vc-profile-body">
+                        <section class="vc-profile-section" data-about-section><h3 class="vc-profile-section-title">About Me</h3><p class="vc-profile-bio" data-profile-bio></p></section>
+                        <section class="vc-profile-section"><h3 class="vc-profile-section-title">Profile</h3><div class="vc-profile-facts" data-profile-facts></div></section>
+                        <section class="vc-profile-section" data-roles-section hidden><h3 class="vc-profile-section-title">Roles</h3><div class="vc-profile-chips" data-profile-roles></div></section>
+                        <section class="vc-profile-section" data-connections-section hidden><h3 class="vc-profile-section-title">Connections</h3><div class="vc-profile-chips" data-profile-connections></div></section>
+                        <section class="vc-profile-section"><h3 class="vc-profile-section-title">Shared Voice Activity</h3><div class="vc-profile-note" data-history-summary></div><div class="vc-profile-history" data-profile-history style="margin-top:10px"></div></section>
+                        <div class="vc-profile-note" data-profile-note hidden></div>
+                    </div>
+                </div>
+            </div></div>
+            """
+
+        def create_js(self):
+            return r"""
+            try {
+                const profile=JSON.parse(${data.profile_json})||{};
+                const q=s=>element.querySelector(s);
+                const setText=(s,v)=>{const n=q(s);if(n)n.textContent=v==null?'':String(v)};
+                const safeUrl=v=>{const u=String(v||'').trim();return /^(https?:|data:image\/)/i.test(u)?u:''};
+                const fmtDuration=v=>{let s=Math.max(0,Math.round(Number(v)||0));const h=Math.floor(s/3600);s%=3600;const m=Math.floor(s/60);s%=60;return h?`${h}h ${m}m`:(m?`${m}m ${s}s`:`${s}s`)};
+                const fmtDate=v=>{if(!v)return'Unknown';const d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})};
+                const renderDiscordMarkdown=value=>{
+                    const escapeHtml=input=>String(input||'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
+                    const saved=[];
+                    const hold=html=>`\u0000VC${saved.push(html)-1}\u0000`;
+                    let output=escapeHtml(value).replace(/\r\n?/g,'\n');
+                    output=output.replace(/```(?:([a-zA-Z0-9_+.-]+)\n)?([\s\S]*?)```/g,(_,language,code)=>hold(`<pre${language?` data-language="${language}"`:''}><code>${code}</code></pre>`));
+                    output=output.replace(/`([^`\n]+)`/g,(_,code)=>hold(`<code>${code}</code>`));
+                    output=output.replace(/&lt;(a?):([A-Za-z0-9_]{2,32}):(\d{15,22})&gt;/g,(_,animated,name,id)=>hold(`<img class="vc-custom-emoji" src="https://cdn.discordapp.com/emojis/${id}.${animated?'gif':'webp'}?size=48&amp;quality=lossless" alt=":${name}:" title=":${name}:" loading="lazy">`));
+                    output=output.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,(_,label,url)=>hold(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`));
+                    output=output.replace(/\*\*([^\n*][\s\S]*?)\*\*/g,'<strong>$1</strong>');
+                    output=output.replace(/__([^\n_][\s\S]*?)__/g,'<u>$1</u>');
+                    output=output.replace(/~~([^\n~][\s\S]*?)~~/g,'<s>$1</s>');
+                    output=output.replace(/\|\|([^\n|][\s\S]*?)\|\|/g,'<span class="vc-markdown-spoiler" role="button" tabindex="0">$1</span>');
+                    output=output.replace(/(^|[^*])\*([^*\n]+)\*/g,'$1<em>$2</em>');
+                    output=output.replace(/(^|[^_])_([^_\n]+)_/g,'$1<em>$2</em>');
+                    output=output.split('\n').map(line=>line.startsWith('&gt; ')?`<blockquote>${line.slice(5)}</blockquote>`:line).join('<br>');
+                    output=output.replace(/\u0000VC(\d+)\u0000/g,(_,index)=>saved[Number(index)]||'');
+                    return output;
+                };
+                const card=q('.vc-profile-card');if(card&&profile.accent_color)card.style.setProperty('--profile-accent',String(profile.accent_color));
+                const banner=q('[data-profile-banner]'),bannerUrl=safeUrl(profile.banner_url);if(banner&&bannerUrl)banner.style.backgroundImage='linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.14)),url('+JSON.stringify(bannerUrl)+')';
+                const effect=q('[data-profile-effect]');if(effect&&profile.profile_effect_id)effect.hidden=false;
+                const avatar=q('[data-profile-avatar]'),avatarUrl=safeUrl(profile.avatar_url);if(avatar){if(avatarUrl)avatar.src=avatarUrl;avatar.alt=`${profile.display_name||'User'} avatar`}
+                const decoration=q('[data-profile-decoration]'),decorationUrl=safeUrl(profile.decoration_url);if(decoration&&decorationUrl){decoration.src=decorationUrl;decoration.hidden=false}
+                const status=q('.vc-profile-status');if(status&&profile.status_color)status.style.background=String(profile.status_color);
+                setText('[data-profile-display-name]',profile.display_name||profile.username||'Unknown user');setText('[data-profile-username]',profile.username_line||profile.username||'');
+                const pronouns=q('[data-profile-pronouns]');if(pronouns&&profile.pronouns){pronouns.textContent=profile.pronouns;pronouns.hidden=false}
+                const tag=q('[data-profile-tag]');if(tag&&profile.server_tag){setText('[data-profile-tag-text]',profile.server_tag);const badge=q('[data-profile-tag-badge]'),url=safeUrl(profile.server_badge_url);if(badge&&url)badge.src=url;else if(badge)badge.hidden=true;tag.style.display='inline-flex'}
+                const badges=q('[data-profile-badges]');(Array.isArray(profile.badges)?profile.badges:[]).forEach(item=>{const url=safeUrl(item&&item.url);if(!badges||!url)return;const img=document.createElement('img');img.className='vc-profile-badge';img.src=url;img.alt=String(item.description||'Profile badge');img.title=img.alt;badges.appendChild(img)});if(badges&&badges.children.length)badges.hidden=false;
+                const bio=String(profile.bio||'').trim(),about=q('[data-about-section]'),bioNode=q('[data-profile-bio]');if(bio&&bioNode){bioNode.innerHTML=renderDiscordMarkdown(bio);bioNode.querySelectorAll('.vc-markdown-spoiler').forEach(spoiler=>{const toggle=()=>spoiler.classList.toggle('is-visible');spoiler.addEventListener('click',toggle);spoiler.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle()}})})}else if(about)about.hidden=true;
+                const facts=q('[data-profile-facts]');[['Voice State',profile.voice_state||'Active'],['Discord Member Since',fmtDate(profile.created_at)],['Server Member Since',fmtDate(profile.joined_at)],['User ID',profile.user_id||'-'],['Mutual Servers',profile.mutual_guilds_count],['Mutual Friends',profile.mutual_friends_count]].filter(i=>i[1]!==null&&i[1]!==undefined&&i[1]!=='').forEach(([label,value])=>{if(!facts)return;const box=document.createElement('div');box.className='vc-profile-fact';const key=document.createElement('span');key.className='vc-profile-fact-label';key.textContent=label;const val=document.createElement('span');val.className='vc-profile-fact-value';val.textContent=String(value);box.append(key,val);facts.appendChild(box)});
+                const roles=q('[data-profile-roles]');(Array.isArray(profile.roles)?profile.roles:[]).forEach(role=>{if(!roles)return;const chip=document.createElement('span');chip.className='vc-profile-chip';chip.textContent=String(role||'');roles.appendChild(chip)});const rolesSection=q('[data-roles-section]');if(rolesSection&&roles&&roles.children.length)rolesSection.hidden=false;
+                const connections=q('[data-profile-connections]');(Array.isArray(profile.connections)?profile.connections:[]).forEach(connection=>{if(!connections)return;const chip=document.createElement('span');chip.className='vc-profile-chip';chip.textContent=String(connection||'');connections.appendChild(chip)});const connectionsSection=q('[data-connections-section]');if(connectionsSection&&connections&&connections.children.length)connectionsSection.hidden=false;
+                const sessions=Array.isArray(profile.shared_sessions)?profile.shared_sessions.slice().reverse():[],total=Math.max(0,Number(profile.shared_total_seconds)||0);setText('[data-history-summary]',sessions.length?`${sessions.length} shared session${sessions.length===1?'':'s'} · ${fmtDuration(total)} together`:'No shared voice sessions have been recorded yet.');const history=q('[data-profile-history]');sessions.forEach(session=>{if(!history)return;const row=document.createElement('div');row.className='vc-profile-session';const main=document.createElement('div');main.className='vc-profile-session-main';const channel=document.createElement('div');channel.className='vc-profile-session-channel';channel.textContent=`#${session.channel_name||'voice-channel'} · ${session.guild_name||'Server'}`;const meta=document.createElement('div');meta.className='vc-profile-session-meta';meta.textContent=`${session.end_time?'Shared':'Currently sharing'} · ${fmtDate(session.start_time)}`;const time=document.createElement('span');time.className='vc-profile-session-duration';time.textContent=fmtDuration(session.duration_seconds);main.append(channel,meta);row.append(main,time);history.appendChild(row)});
+                const note=q('[data-profile-note]');if(note&&profile.fetch_note){note.textContent=String(profile.fetch_note);note.hidden=false}
+            }catch(error){console.error('ParticipantProfileModal populate error:',error)}
+            element.style.opacity='0';element.style.transition='opacity .16s ease-out';requestAnimationFrame(()=>element.style.opacity='1');
+            """
+
+        def remove_js(self):
+            return "element.style.opacity = '0';"
+
     @cui_new(type="callable", name="UpdateAvailableModal")
     class UpdateAvailableModal:
         _init_params = ["self", "current_version", "latest_version", "project_url"]
@@ -2297,9 +2423,10 @@ def vc_manager_farm_script():
 
     def fresh_data():
         return {
-            "version": 2,
+            "version": 3,
             "total_vc_time_seconds": 0.0,
             "sessions": [],
+            "participant_history": {},
             "settings": {
                 "auto_disconnect_minutes": None,
                 "leave_when_alone": False,
@@ -2345,6 +2472,13 @@ def vc_manager_farm_script():
                     base["total_vc_time_seconds"] = total_seconds if math.isfinite(total_seconds) and total_seconds >= 0 else 0.0
                     sessions = data.get("sessions", [])
                     base["sessions"] = [item for item in sessions if isinstance(item, dict)] if isinstance(sessions, list) else []
+                    participant_history = data.get("participant_history", {})
+                    if isinstance(participant_history, dict):
+                        base["participant_history"] = {
+                            str(user_id): entry
+                            for user_id, entry in participant_history.items()
+                            if isinstance(entry, dict)
+                        }
                     if isinstance(data.get("settings"), dict):
                         stored_settings = dict(data["settings"])
                         stored_slash = stored_settings.pop("slash_responses", None)
@@ -2502,6 +2636,7 @@ def vc_manager_farm_script():
     selected_token_channel_id = None
     _updating_dropdowns = False
     ui_refs = {}
+    participant_profile_requests = set()
     token_add_requests = {}
     status_editor_channel_id = None
     # VC Manager owns connections opened through this script. Ignore Nighty's
@@ -2511,6 +2646,7 @@ def vc_manager_farm_script():
     # Multi-token state
     token_clients = {}
     runtime_state["token_clients"] = token_clients
+    participant_sessions = runtime_state["participant_sessions"]
 
     def selected_item_id(value):
         if isinstance(value, (list, tuple)):
@@ -4075,6 +4211,119 @@ def vc_manager_farm_script():
         })
         save_data(data)
 
+    def member_avatar_url(member, size=256):
+        asset = getattr(member, "display_avatar", None) or getattr(member, "avatar", None)
+        if not asset:
+            return ""
+        try:
+            if hasattr(asset, "with_size"):
+                asset = asset.with_size(size)
+        except Exception:
+            pass
+        return str(getattr(asset, "url", asset) or "")
+
+    def begin_participant_session(member, channel, started_at=None):
+        bot_user = getattr(bot, "user", None)
+        if not member or not channel or (bot_user and member.id == bot_user.id):
+            return
+        user_id = str(member.id)
+        current = participant_sessions.get(user_id)
+        if isinstance(current, dict) and str(current.get("channel_id") or "") == str(channel.id):
+            current["name"] = str(getattr(member, "display_name", getattr(member, "name", "User")))
+            current["avatar_url"] = member_avatar_url(member, 128)
+            return
+        if current:
+            end_participant_session(user_id)
+        participant_sessions[user_id] = {
+            "user_id": user_id,
+            "name": str(getattr(member, "display_name", getattr(member, "name", "User"))),
+            "avatar_url": member_avatar_url(member, 128),
+            "guild_id": str(getattr(getattr(channel, "guild", None), "id", "")),
+            "guild_name": str(getattr(getattr(channel, "guild", None), "name", "Unknown Server")),
+            "channel_id": str(channel.id),
+            "channel_name": str(getattr(channel, "name", "Voice Channel")),
+            "start_time": started_at if isinstance(started_at, datetime) else datetime.now(),
+        }
+
+    def end_participant_session(user_id, ended_at=None):
+        active = participant_sessions.pop(str(user_id), None)
+        if not isinstance(active, dict):
+            return
+        start_time = active.get("start_time")
+        if not isinstance(start_time, datetime):
+            try:
+                start_time = datetime.fromisoformat(str(start_time))
+            except (TypeError, ValueError):
+                start_time = datetime.now()
+        ended_at = ended_at if isinstance(ended_at, datetime) else datetime.now()
+        session = {
+            "guild_id": str(active.get("guild_id") or ""),
+            "guild_name": str(active.get("guild_name") or "Unknown Server"),
+            "channel_id": str(active.get("channel_id") or ""),
+            "channel_name": str(active.get("channel_name") or "Voice Channel"),
+            "start_time": start_time.isoformat(),
+            "end_time": ended_at.isoformat(),
+            "duration_seconds": max(0.0, (ended_at - start_time).total_seconds()),
+        }
+        data = load_data()
+        history = data.setdefault("participant_history", {})
+        entry = history.setdefault(str(user_id), {})
+        entry["name"] = str(active.get("name") or entry.get("name") or "User")
+        entry["avatar_url"] = str(active.get("avatar_url") or entry.get("avatar_url") or "")
+        sessions = entry.get("sessions", [])
+        if not isinstance(sessions, list):
+            sessions = []
+        sessions.append(session)
+        entry["sessions"] = [item for item in sessions if isinstance(item, dict)][-200:]
+        save_data(data)
+
+    def close_participant_sessions(channel_id=None):
+        target_channel_id = str(channel_id) if channel_id is not None else None
+        for user_id, active in list(participant_sessions.items()):
+            if target_channel_id is None or str(active.get("channel_id") or "") == target_channel_id:
+                end_participant_session(user_id)
+
+    def sync_participant_sessions(channel, members=None):
+        if not channel:
+            close_participant_sessions()
+            return
+        bot_user = getattr(bot, "user", None)
+        members = list(members if members is not None else (getattr(channel, "members", []) or []))
+        present_ids = {
+            str(member.id) for member in members
+            if not bot_user or member.id != bot_user.id
+        }
+        for user_id, active in list(participant_sessions.items()):
+            if str(active.get("channel_id") or "") == str(channel.id) and user_id not in present_ids:
+                end_participant_session(user_id)
+        for member in members:
+            begin_participant_session(member, channel)
+
+    def get_participant_session_history(user_id):
+        user_id = str(user_id)
+        entry = load_data().get("participant_history", {}).get(user_id, {})
+        sessions = [
+            dict(item) for item in entry.get("sessions", [])
+            if isinstance(item, dict)
+        ] if isinstance(entry, dict) else []
+        active = participant_sessions.get(user_id)
+        if isinstance(active, dict):
+            start_time = active.get("start_time")
+            if not isinstance(start_time, datetime):
+                try:
+                    start_time = datetime.fromisoformat(str(start_time))
+                except (TypeError, ValueError):
+                    start_time = datetime.now()
+            sessions.append({
+                "guild_id": str(active.get("guild_id") or ""),
+                "guild_name": str(active.get("guild_name") or "Unknown Server"),
+                "channel_id": str(active.get("channel_id") or ""),
+                "channel_name": str(active.get("channel_name") or "Voice Channel"),
+                "start_time": start_time.isoformat(),
+                "duration_seconds": max(0.0, (datetime.now() - start_time).total_seconds()),
+            })
+        return sessions
+
     def get_primary_session_history(include_live=True):
         sessions = [
             dict(session) for session in load_data().get("sessions", [])
@@ -4419,6 +4668,7 @@ def vc_manager_farm_script():
             # A move to another channel ends the managed session.
             if new_channel and str(new_channel.id) != target_channel_id:
                 if old_channel and str(old_channel.id) == target_channel_id:
+                    close_participant_sessions(old_channel.id)
                     record_session(old_channel, connection_start_time)
                 active_channel = None
                 set_connection_start(None)
@@ -4428,6 +4678,7 @@ def vc_manager_farm_script():
 
             # Disconnected
             if not new_channel:
+                close_participant_sessions(getattr(old_channel or active_channel, "id", None))
                 record_session(old_channel or active_channel, connection_start_time)
 
                 active_channel = None
@@ -4456,6 +4707,7 @@ def vc_manager_farm_script():
                     is_camera_on,
                 )
                 if old_channel and old_channel.id != new_channel.id and connection_start_time:
+                    close_participant_sessions(old_channel.id)
                     record_session(old_channel, connection_start_time)
                     set_connection_start(datetime.now())
                 active_channel = new_channel
@@ -4489,6 +4741,7 @@ def vc_manager_farm_script():
                         video=is_camera_on,
                     )
 
+                sync_participant_sessions(new_channel)
                 update_all_ui()
                 return
 
@@ -4504,6 +4757,15 @@ def vc_manager_farm_script():
 
         if not cur:
             return
+
+        before_channel = getattr(before, "channel", None) if before else None
+        after_channel = getattr(after, "channel", None) if after else None
+        was_here = before_channel and str(before_channel.id) == str(cur.id)
+        is_here = after_channel and str(after_channel.id) == str(cur.id)
+        if was_here and not is_here:
+            end_participant_session(member.id)
+        elif is_here:
+            begin_participant_session(member, cur)
 
         # Leave when alone check
         if is_leave_when_alone:
@@ -5381,7 +5643,8 @@ def vc_manager_farm_script():
     participant_pager_id = f"vc-participant-pager-{id(participants_card)}"
     participants_pager = participants_card.create_ui_element(
         UI.ParticipantPager,
-        pager_id=participant_pager_id
+        pager_id=participant_pager_id,
+        on_select=lambda payload: handle_participant_profile(payload)
     )
     ui_refs["participants_pager"] = participants_pager
 
@@ -5660,6 +5923,233 @@ def vc_manager_farm_script():
 
     # ==================== UI UPDATE & LOGIC HANDLERS ====================
 
+    def profile_asset_url(asset, size=None):
+        if not asset:
+            return ""
+        candidate = asset
+        try:
+            if size and hasattr(candidate, "with_size"):
+                candidate = candidate.with_size(size)
+        except Exception:
+            pass
+        value = getattr(candidate, "url", candidate)
+        return str(value or "")
+
+    def profile_color(value, fallback="#5865f2"):
+        if value is None:
+            return fallback
+        raw = getattr(value, "value", value)
+        try:
+            return f"#{int(raw) & 0xFFFFFF:06x}"
+        except (TypeError, ValueError):
+            text = str(raw).strip()
+            if re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+                return text
+        return fallback
+
+    def metadata_value(*metadata_items, attribute):
+        for metadata in metadata_items:
+            value = getattr(metadata, attribute, None) if metadata else None
+            if value not in (None, "", [], ()):
+                return value
+        return None
+
+    async def open_participant_profile(user_id):
+        cur = get_current_voice_channel()
+        if not cur:
+            tab.toast("Profile unavailable", "Connect through VC Manager first.", "INFO")
+            return
+        try:
+            user_id_int = int(str(user_id))
+        except (TypeError, ValueError):
+            tab.toast("Profile unavailable", "VC Manager could not identify that participant.", "ERROR")
+            return
+
+        guild = getattr(cur, "guild", None)
+        member = guild.get_member(user_id_int) if guild else None
+        if member is None:
+            member = next((item for item in getattr(cur, "members", []) if item.id == user_id_int), None)
+        if member is None:
+            tab.toast("Profile unavailable", "That participant is no longer in this voice channel.", "INFO")
+            update_participants_table()
+            return
+
+        voice_state = getattr(member, "voice", None)
+        state_names = []
+        if voice_state:
+            if getattr(voice_state, "self_mute", False) or getattr(voice_state, "mute", False):
+                state_names.append("Mute")
+            if getattr(voice_state, "self_deaf", False) or getattr(voice_state, "deaf", False):
+                state_names.append("Deaf")
+            if getattr(voice_state, "self_stream", False) or getattr(voice_state, "streaming", False):
+                state_names.append("Stream")
+            if getattr(voice_state, "self_video", False):
+                state_names.append("Camera")
+
+        full_profile = None
+        fetch_note = ""
+        profile_method = getattr(member, "profile", None)
+        if callable(profile_method):
+            try:
+                try:
+                    full_profile = await profile_method(
+                        with_mutual_guilds=True,
+                        with_mutual_friends_count=True,
+                        with_mutual_friends=False,
+                    )
+                except TypeError:
+                    full_profile = await profile_method()
+            except Exception as error:
+                fetch_note = "Discord did not return every profile detail. Cached account and server details are shown."
+                print(
+                    f"[VC Manager] Could not fetch participant profile {member.id}: {type(error).__name__}: {error}",
+                    type_="ERROR",
+                )
+        else:
+            fetch_note = "This Nighty build does not expose Discord's extended profile endpoint."
+
+        profile_source = full_profile or member
+        global_metadata = getattr(full_profile, "metadata", None) if full_profile else None
+        guild_metadata = getattr(full_profile, "guild_metadata", None) if full_profile else None
+        bio = metadata_value(guild_metadata, global_metadata, attribute="bio")
+        if not bio and full_profile:
+            bio = (
+                getattr(full_profile, "display_bio", None)
+                or getattr(full_profile, "guild_bio", None)
+                or getattr(full_profile, "bio", None)
+            )
+        pronouns = metadata_value(guild_metadata, global_metadata, attribute="pronouns")
+        if not pronouns and full_profile:
+            pronouns = getattr(full_profile, "pronouns", None)
+        banner = metadata_value(guild_metadata, global_metadata, attribute="banner")
+        if not banner and full_profile:
+            banner = getattr(full_profile, "display_banner", None) or getattr(full_profile, "banner", None)
+        effect_id = metadata_value(guild_metadata, global_metadata, attribute="effect_id")
+        if not effect_id and full_profile:
+            effect_id = getattr(full_profile, "effect_id", None) or getattr(full_profile, "profile_effect_id", None)
+        accent = metadata_value(guild_metadata, global_metadata, attribute="accent_color")
+        if accent is None:
+            theme_colors = metadata_value(guild_metadata, global_metadata, attribute="theme_colors")
+            if isinstance(theme_colors, (list, tuple)) and theme_colors:
+                accent = theme_colors[0]
+        if accent is None:
+            accent = getattr(full_profile, "accent_color", None) if full_profile else getattr(member, "color", None)
+
+        avatar = getattr(profile_source, "display_avatar", None) or getattr(member, "display_avatar", None)
+        decoration = getattr(profile_source, "avatar_decoration", None) or getattr(member, "avatar_decoration", None)
+        primary_guild = getattr(profile_source, "primary_guild", None) or getattr(member, "primary_guild", None)
+        server_tag = ""
+        server_badge_url = ""
+        if primary_guild and getattr(primary_guild, "identity_enabled", True):
+            server_tag = str(getattr(primary_guild, "tag", "") or "")
+            server_badge_url = profile_asset_url(
+                getattr(primary_guild, "badge", None) or getattr(primary_guild, "badge_url", None),
+                64,
+            )
+
+        badges = []
+        for badge in list(getattr(full_profile, "badges", []) or []):
+            url = profile_asset_url(getattr(badge, "url", None))
+            if url:
+                badges.append({
+                    "url": url,
+                    "description": str(getattr(badge, "description", "Profile badge") or "Profile badge"),
+                })
+
+        roles = []
+        for role in reversed(list(getattr(member, "roles", []) or [])):
+            is_default = getattr(role, "is_default", False)
+            if (is_default() if callable(is_default) else bool(is_default)):
+                continue
+            name = str(getattr(role, "name", "") or "").strip()
+            if name:
+                roles.append(name)
+
+        connections = []
+        for connection in list(getattr(full_profile, "connections", []) or []):
+            connection_name = str(getattr(connection, "name", "") or "").strip()
+            connection_type = getattr(connection, "type", "")
+            connection_type = str(getattr(connection_type, "name", connection_type) or "").strip()
+            label = " · ".join(part for part in (connection_type.title(), connection_name) if part)
+            if label:
+                connections.append(label)
+
+        discriminator = str(getattr(profile_source, "discriminator", "0") or "0")
+        username = str(getattr(profile_source, "name", getattr(member, "name", "Unknown")))
+        username_line = f"@{username}" + (f"#{discriminator}" if discriminator != "0" else "")
+        shared_sessions = get_participant_session_history(member.id)
+        shared_total_seconds = 0.0
+        for item in shared_sessions:
+            if not isinstance(item, dict):
+                continue
+            try:
+                shared_total_seconds += max(0.0, float(item.get("duration_seconds", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        profile_data = {
+            "user_id": str(member.id),
+            "display_name": str(getattr(member, "display_name", getattr(profile_source, "display_name", username))),
+            "username": username,
+            "username_line": username_line,
+            "avatar_url": profile_asset_url(avatar, 256),
+            "decoration_url": profile_asset_url(decoration, 256),
+            "banner_url": profile_asset_url(banner, 1024),
+            "accent_color": profile_color(accent),
+            "profile_effect_id": str(effect_id or ""),
+            "bio": str(bio or ""),
+            "pronouns": str(pronouns or ""),
+            "server_tag": server_tag,
+            "server_badge_url": server_badge_url,
+            "badges": badges,
+            "roles": roles[:40],
+            "connections": connections[:20],
+            "created_at": getattr(member, "created_at", None).isoformat() if getattr(member, "created_at", None) else "",
+            "joined_at": getattr(member, "joined_at", None).isoformat() if getattr(member, "joined_at", None) else "",
+            "mutual_guilds_count": len(getattr(full_profile, "mutual_guilds", []) or []) if full_profile else None,
+            "mutual_friends_count": getattr(full_profile, "mutual_friends_count", None) if full_profile else None,
+            "voice_state": " | ".join(state_names) if state_names else "Active",
+            "status_color": {
+                "online": "#23a55a",
+                "idle": "#f0b232",
+                "dnd": "#f23f43",
+                "do_not_disturb": "#f23f43",
+                "streaming": "#593695",
+            }.get(str(getattr(member, "status", "offline")).lower(), "#80848e"),
+            "shared_sessions": shared_sessions,
+            "shared_total_seconds": shared_total_seconds,
+            "fetch_note": fetch_note,
+        }
+        evaluate_js(
+            "document.querySelectorAll('[data-vc-participant-profile]').forEach(function(card) { "
+            "const wrapper = card.parentElement; if (wrapper && wrapper.remove) wrapper.remove(); });"
+        )
+        tab.participantprofilemodal(
+            profile_json=json.dumps(json.dumps(profile_data, ensure_ascii=False)),
+            onClose=lambda: None,
+            allow_outside_click=True,
+        )
+
+    def handle_participant_profile(payload):
+        try:
+            action_data = json.loads(payload) if isinstance(payload, str) else payload
+        except (TypeError, ValueError, json.JSONDecodeError):
+            action_data = {"id": str(payload or "")}
+        user_id = str(action_data.get("id") or "") if isinstance(action_data, dict) else ""
+        if not user_id:
+            tab.toast("Profile unavailable", "Refresh the participant list and try again.", "ERROR")
+            return
+        if user_id in participant_profile_requests:
+            return
+        participant_profile_requests.add(user_id)
+
+        async def load_profile():
+            try:
+                await open_participant_profile(user_id)
+            finally:
+                participant_profile_requests.discard(user_id)
+
+        safe_create_task(load_profile())
+
     def update_participants_table():
         cur = get_current_voice_channel()
         if not cur:
@@ -5692,6 +6182,7 @@ def vc_manager_farm_script():
                     cached_members.append(member)
             if cached_members:
                 members = cached_members
+        sync_participant_sessions(cur, members)
         ui_refs["participants_title"].content = f"Channel Participants ({len(members)})"
 
         rows = []
@@ -5710,15 +6201,12 @@ def vc_manager_farm_script():
                     active_states.append("Camera")
 
             voice_state_text = " | ".join(active_states) if active_states else "Active"
-            avatar_url = ""
-            if hasattr(m, "display_avatar") and m.display_avatar:
-                avatar_url = str(m.display_avatar.url)
-            elif hasattr(m, "avatar") and m.avatar:
-                avatar_url = str(m.avatar.url)
+            avatar_url = member_avatar_url(m, 128)
 
             rows.append({
                 "id": str(m.id),
                 "name": getattr(m, "display_name", m.name),
+                "username": getattr(m, "name", ""),
                 "avatar_url": avatar_url,
                 "voice_state": voice_state_text
             })
