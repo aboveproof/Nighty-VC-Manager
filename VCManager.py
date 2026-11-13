@@ -3,7 +3,7 @@
 # Voice controls, session data, and multi-token account management for Nighty
 
 @nightyScript(
-    name="VC Manager v4.4.0",
+    name="VC Manager v4.4.1",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
     usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
@@ -78,7 +78,7 @@ def vc_manager_farm_script():
 
     import aiohttp
 
-    SCRIPT_VERSION = "4.4.0"
+    SCRIPT_VERSION = "4.4.1"
     PROJECT_URL = "https://github.com/aboveproof/Nighty-VC-Manager"
     VERSION_SOURCE_URL = (
         "https://raw.githubusercontent.com/aboveproof/Nighty-VC-Manager/main/VCManager.py"
@@ -2427,6 +2427,7 @@ def vc_manager_farm_script():
             "total_vc_time_seconds": 0.0,
             "sessions": [],
             "participant_history": {},
+            "reconnect_channel": None,
             "settings": {
                 "auto_disconnect_minutes": None,
                 "leave_when_alone": False,
@@ -2478,6 +2479,13 @@ def vc_manager_farm_script():
                             str(user_id): entry
                             for user_id, entry in participant_history.items()
                             if isinstance(entry, dict)
+                        }
+                    saved_channel = data.get("reconnect_channel")
+                    if isinstance(saved_channel, dict) and str(saved_channel.get("guild_id", "")).isdigit() and str(saved_channel.get("channel_id", "")).isdigit():
+                        base["reconnect_channel"] = {
+                            "guild_id": str(saved_channel["guild_id"]),
+                            "channel_id": str(saved_channel["channel_id"]),
+                            "channel_name": str(saved_channel.get("channel_name") or "Voice Channel"),
                         }
                     if isinstance(data.get("settings"), dict):
                         stored_settings = dict(data["settings"])
@@ -4022,6 +4030,19 @@ def vc_manager_farm_script():
             }
         runtime_state["managed_target"] = managed_target
 
+    def save_reconnect_channel(channel=None):
+        data = load_data()
+        target = None
+        if channel is not None:
+            target = {
+                "guild_id": str(channel.guild.id),
+                "channel_id": str(channel.id),
+                "channel_name": str(channel.name),
+            }
+        if data.get("reconnect_channel") != target:
+            data["reconnect_channel"] = target
+            save_data(data)
+
     def set_connection_start(value):
         """Keep the live session clock available across Nighty hot reloads."""
         nonlocal connection_start_time
@@ -4057,16 +4078,17 @@ def vc_manager_farm_script():
                 if state_channel_id is None and state:
                     state_channel_id = getattr(state, "channel_id", None)
 
-                if channel and str(state_channel_id or "") == target_channel_id:
-                    active_channel = channel
-                    return channel
+                matched_channel = channel or state_channel
+                if matched_channel and str(state_channel_id or "") == target_channel_id:
+                    active_channel = matched_channel
+                    return matched_channel
 
                 me = getattr(guild, "me", None) or guild.get_member(bot_user.id)
                 voice_state = getattr(me, "voice", None) if me else None
                 member_channel = getattr(voice_state, "channel", None) if voice_state else None
-                if channel and member_channel and str(member_channel.id) == target_channel_id:
-                    active_channel = channel
-                    return channel
+                if member_channel and str(member_channel.id) == target_channel_id:
+                    active_channel = channel or member_channel
+                    return active_channel
         except Exception:
             pass
 
@@ -4589,6 +4611,8 @@ def vc_manager_farm_script():
                 record_session(channel, started_at)
                 active_channel = None
                 set_managed_target()
+                if intentional:
+                    save_reconnect_channel()
                 if ui_refs:
                     update_all_ui()
             else:
@@ -4603,6 +4627,7 @@ def vc_manager_farm_script():
         current = get_current_voice_channel()
         if current:
             active_channel = current
+            save_reconnect_channel(current)
             reconnect_target = {
                 "guild_id": str(current.guild.id),
                 "channel_id": str(current.id),
@@ -4673,6 +4698,7 @@ def vc_manager_farm_script():
                 active_channel = None
                 set_connection_start(None)
                 set_managed_target()
+                save_reconnect_channel()
                 update_all_ui()
                 return
 
@@ -4695,6 +4721,7 @@ def vc_manager_farm_script():
                 intentional_disconnect = False
                 if not is_auto_reconnect:
                     set_managed_target()
+                    save_reconnect_channel()
                 update_all_ui()
                 return
 
@@ -4711,6 +4738,7 @@ def vc_manager_farm_script():
                     record_session(old_channel, connection_start_time)
                     set_connection_start(datetime.now())
                 active_channel = new_channel
+                save_reconnect_channel(new_channel)
                 reconnect_target = {
                     "guild_id": str(new_channel.guild.id),
                     "channel_id": str(new_channel.id),
@@ -4856,7 +4884,7 @@ def vc_manager_farm_script():
             if toggle:
                 toggle.checked = bool(settings.get(setting_key, True))
 
-    def slash_theme_layout(content, footer=None):
+    def slash_theme_layout(content, footer=None, title=None):
         """Build Discord Components V2 using nes's Nighty V2 theme schema."""
         def limited_text(value):
             value = str(value or "")
@@ -4922,6 +4950,8 @@ def vc_manager_farm_script():
             children.insert(0, {"type": 10, "content": content})
         if not children:
             children = [{"type": 10, "content": content}]
+        if title:
+            children.insert(0, {"type": 10, "content": limited_text(f"## {title}")})
         if footer is not None:
             children = children[:37] + [
                 {"type": 14, "divider": True, "spacing": 1},
@@ -4958,7 +4988,7 @@ def vc_manager_farm_script():
         async def send_v2(self, title, description, ephemeral=None, footer=None):
             if ephemeral is None:
                 ephemeral = get_slash_response_settings()["ephemeral"]
-            content = f"## {title}\n{description}" if title else description
+            content = description
             interaction_id = str(getattr(self.interaction, "id", "") or "")
             interaction_token = str(getattr(self.interaction, "token", "") or "")
             if interaction_id and interaction_token and not self._done:
@@ -4966,7 +4996,7 @@ def vc_manager_farm_script():
                     "type": 4,
                     "data": {
                         "flags": COMPONENTS_V2_FLAG | (EPHEMERAL_FLAG if ephemeral else 0),
-                        "components": slash_theme_layout(content, footer=footer),
+                        "components": slash_theme_layout(content, footer=footer, title=title),
                         "allowed_mentions": {"parse": []}
                     }
                 }
@@ -4989,7 +5019,7 @@ def vc_manager_farm_script():
             return False
 
         async def edit_v2(self, title, description):
-            content = f"## {title}\n{description}" if title else description
+            content = description
             interaction_token = str(getattr(self.interaction, "token", "") or "")
             application_id = getattr(self.interaction, "application_id", None)
             if not application_id and slash_bot_app:
@@ -5005,7 +5035,7 @@ def vc_manager_farm_script():
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.patch(
                         url,
-                        json={"components": slash_theme_layout(content), "allowed_mentions": {"parse": []}}
+                        json={"components": slash_theme_layout(content, title=title), "allowed_mentions": {"parse": []}}
                     ) as response:
                         if response.status == 200:
                             return True
@@ -6890,10 +6920,20 @@ def vc_manager_farm_script():
 
     async def handle_reconnect_toggle(checked):
         nonlocal is_auto_reconnect
+        previous_value = is_auto_reconnect
         is_auto_reconnect = as_bool(checked)
         data = load_data()
         data["settings"]["auto_reconnect"] = is_auto_reconnect
-        save_data(data)
+        if not save_data(data):
+            is_auto_reconnect = previous_value
+            reconnect_toggle.checked = previous_value
+            tab.toast("Auto-reconnect not saved", "Nighty could not save this setting. Check its file access, then try again.", "ERROR")
+            return
+        restore_task = runtime_state.get("startup_voice_restore")
+        if not is_auto_reconnect and restore_task and not restore_task.done():
+            restore_task.cancel()
+        elif is_auto_reconnect and data.get("reconnect_channel") and not get_current_voice_channel():
+            safe_create_task(startup_sync())
         tab.toast("Auto-reconnect", "Enabled" if is_auto_reconnect else "Disabled", "SUCCESS")
 
     async def handle_leave_alone_toggle(checked):
@@ -7701,6 +7741,34 @@ def vc_manager_farm_script():
         # finish logging in.
         await sync_voice_state(update_ui=True)
         await refresh_server_list(preserve_selection=True)
+        saved_channel = load_data().get("reconnect_channel") if is_auto_reconnect else None
+        if saved_channel and not get_current_voice_channel():
+            existing_restore = runtime_state.get("startup_voice_restore")
+            if not existing_restore or existing_restore.done():
+                async def restore_voice():
+                    attempt = 0
+                    while True:
+                        if not is_auto_reconnect or load_data().get("reconnect_channel") != saved_channel:
+                            return
+                        if get_current_voice_channel():
+                            return
+                        try:
+                            guild = bot.get_guild(int(saved_channel["guild_id"]))
+                            if guild:
+                                if await connect(saved_channel["guild_id"], saved_channel["channel_id"]):
+                                    for _ in range(20):
+                                        await asyncio.sleep(0.5)
+                                        if get_current_voice_channel():
+                                            await sync_voice_state(update_ui=True)
+                                            return
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as error:
+                            print(f"[VC Manager] Startup voice restore failed: {error}", type_="ERROR")
+                        attempt += 1
+                        await asyncio.sleep(min(60, 3 * attempt))
+
+                runtime_state["startup_voice_restore"] = safe_create_task(restore_voice())
         if token_clients:
             clients = list(token_clients.values())
             results = await asyncio.gather(

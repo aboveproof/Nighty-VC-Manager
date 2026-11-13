@@ -4,7 +4,7 @@
 
 Voice controls, session tracking, automation, slash commands, and multi-account connections for Nighty.
 
-[![Version](https://img.shields.io/badge/version-4.4.0-5865F2?style=flat-square)](./VCManager.py)
+[![Version](https://img.shields.io/badge/version-4.4.1-5865F2?style=flat-square)](./VCManager.py)
 [![NightyScript](https://img.shields.io/badge/NightyScript-5.0-111827?style=flat-square)](https://github.com/aboveproof/nighty-docs)
 [![Python](https://img.shields.io/badge/Python-3.x-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE)
@@ -54,7 +54,7 @@ The stream and camera controls update Discord voice-state flags. Actual media be
 
 ### Automation
 
-- Reconnect after an unexpected drop
+- Reconnect after an unexpected drop or Nighty restart when Auto-Reconnect is enabled
 - Leave when the managed account is alone
 - Follow a user between voice channels by user ID
 - Disconnect timer from 0 to 120 minutes
