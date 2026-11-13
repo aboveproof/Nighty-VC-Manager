@@ -3,7 +3,7 @@
 # Voice controls, session data, and multi-token account management for Nighty
 
 @nightyScript(
-    name="VC Manager v4.4.1",
+    name="VC Manager v4.4.2",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
     usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
@@ -78,7 +78,7 @@ def vc_manager_farm_script():
 
     import aiohttp
 
-    SCRIPT_VERSION = "4.4.1"
+    SCRIPT_VERSION = "4.4.2"
     PROJECT_URL = "https://github.com/aboveproof/Nighty-VC-Manager"
     VERSION_SOURCE_URL = (
         "https://raw.githubusercontent.com/aboveproof/Nighty-VC-Manager/main/VCManager.py"
@@ -4884,7 +4884,7 @@ def vc_manager_farm_script():
             if toggle:
                 toggle.checked = bool(settings.get(setting_key, True))
 
-    def slash_theme_layout(content, footer=None, title=None):
+    def slash_theme_layout(content, footer=None):
         """Build Discord Components V2 using nes's Nighty V2 theme schema."""
         def limited_text(value):
             value = str(value or "")
@@ -4950,8 +4950,6 @@ def vc_manager_farm_script():
             children.insert(0, {"type": 10, "content": content})
         if not children:
             children = [{"type": 10, "content": content}]
-        if title:
-            children.insert(0, {"type": 10, "content": limited_text(f"## {title}")})
         if footer is not None:
             children = children[:37] + [
                 {"type": 14, "divider": True, "spacing": 1},
@@ -4988,7 +4986,7 @@ def vc_manager_farm_script():
         async def send_v2(self, title, description, ephemeral=None, footer=None):
             if ephemeral is None:
                 ephemeral = get_slash_response_settings()["ephemeral"]
-            content = description
+            content = f"## {title}\n{description}" if title else description
             interaction_id = str(getattr(self.interaction, "id", "") or "")
             interaction_token = str(getattr(self.interaction, "token", "") or "")
             if interaction_id and interaction_token and not self._done:
@@ -4996,7 +4994,7 @@ def vc_manager_farm_script():
                     "type": 4,
                     "data": {
                         "flags": COMPONENTS_V2_FLAG | (EPHEMERAL_FLAG if ephemeral else 0),
-                        "components": slash_theme_layout(content, footer=footer, title=title),
+                        "components": slash_theme_layout(content, footer=footer),
                         "allowed_mentions": {"parse": []}
                     }
                 }
@@ -5019,7 +5017,7 @@ def vc_manager_farm_script():
             return False
 
         async def edit_v2(self, title, description):
-            content = description
+            content = f"## {title}\n{description}" if title else description
             interaction_token = str(getattr(self.interaction, "token", "") or "")
             application_id = getattr(self.interaction, "application_id", None)
             if not application_id and slash_bot_app:
@@ -5035,7 +5033,7 @@ def vc_manager_farm_script():
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.patch(
                         url,
-                        json={"components": slash_theme_layout(content, title=title), "allowed_mentions": {"parse": []}}
+                        json={"components": slash_theme_layout(content), "allowed_mentions": {"parse": []}}
                     ) as response:
                         if response.status == 200:
                             return True
@@ -7038,6 +7036,7 @@ def vc_manager_farm_script():
             tab.toast("History cleared", "VC Manager removed the saved sessions.", "SUCCESS")
 
         tab.sessionhistorymodal(
+            title="Voice Session History",
             sessions_json=json.dumps(json.dumps(sessions, ensure_ascii=False)),
             total_vc_time=total_time,
             onClear=clear_sessions,
