@@ -4,9 +4,9 @@
 
 Voice controls, session tracking, automation, slash commands, and multi-account connections for Nighty.
 
-[![Version](https://img.shields.io/badge/version-4.4.2-5865F2?style=flat-square)](./VCManager.py)
+[![Version](https://img.shields.io/badge/version-4.5.6-5865F2?style=flat-square)](./VCManager.py)
 [![NightyScript](https://img.shields.io/badge/NightyScript-5.0-111827?style=flat-square)](https://github.com/aboveproof/nighty-docs)
-[![Python](https://img.shields.io/badge/Python-3.x-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE)
 
 </div>
@@ -55,6 +55,7 @@ The stream and camera controls update Discord voice-state flags. Actual media be
 ### Automation
 
 - Reconnect after an unexpected drop or Nighty restart when Auto-Reconnect is enabled
+- Restore the saved screen-share setting after the voice join is confirmed
 - Leave when the managed account is alone
 - Follow a user between voice channels by user ID
 - Disconnect timer from 0 to 120 minutes
@@ -69,6 +70,7 @@ The stream and camera controls update Discord voice-state flags. Actual media be
 - Set one bulk mute, deafen, stream, and camera state before joining all accounts
 - Join or leave one managed account directly from its table row
 - Restore saved voice destinations after recoverable gateway or network drops
+- Restart screen share four seconds after a managed account rejoins
 - Mirror the primary mute, deafen, stream, and camera controls to connected accounts
 - Override mute, deafen, stream, or camera for one account from its table row
 - View each account's channel and connection state
@@ -81,20 +83,20 @@ Secondary accounts use direct Discord Gateway connections. Tokens stay in a loca
 
 ### Slash commands and Components V2
 
-- Real application commands through the Nighty Slash API approach
-- Commands registered for servers, bot DMs, and user-installed private or group DMs
+- `/vc` command registration through Nighty's application command tree
 - Owner-only command execution
-- Discord Components V2 responses
+- Components V2 responses using the active Nighty theme
 - Active Nighty V2 theme support
 - Ephemeral responses enabled by default
 - Dashboard toggles for ephemeral responses, theme use, and detailed status
-- Automatic command fingerprinting and synchronization
+- `/vc history` buttons for previous and next pages, with Themes V2 images and separators
+- Command synchronization handled by VC Manager
 
 ## Requirements
 
 - A working [Nighty](https://nighty.one/) installation
-- A Nighty build that exposes CUI and `bot_app` for slash commands
-- Python 3
+- Nighty 2.6.2 or newer for Components V2 buttons
+- Python 3.14 in Nighty's runtime
 - `aiohttp`, normally included with Nighty
 
 If Nighty does not include `aiohttp`, install it in the Python environment used by Nighty:
@@ -110,11 +112,11 @@ VC Manager is written in **Python for NightyScript 5.0**. NightyScript is Nighty
 That distinction matters if you plan to read, modify, or contribute to the code:
 
 - `@nightyScript(...)` declares the script and its metadata. The decorated entry function is called at the bottom of the file to register the UI, listeners, commands, and background tasks.
-- `bot`, `bot_app`, `UI`, `Tab`, `getConfigData`, `updateConfigData`, and `getScriptsPath` come from Nighty's runtime. They are available without imports.
+- `bot`, `bot_app`, `discord_bot`, `app_commands`, `UI`, `Tab`, `getConfigData`, and `getScriptsPath` come from Nighty's runtime. They are available without imports.
 - The script must not import `discord`, `nighty`, or symbols from either package. Nighty uses a modified `discord.py-self` environment and provides supported objects itself.
 - Discord and Nighty operations are asynchronous. Connection work, API requests, UI callbacks, event listeners, and cleanup run through `async` functions and tasks.
 - The dashboard uses CUI. Python classes describe elements with HTML templates, while Nighty connects their callbacks to the embedded web interface.
-- Slash commands use Nighty's `bot_app` client and Discord application-command endpoints. Responses use Discord Components V2 where available instead of `discord.Embed`, which NightyScript does not support.
+- Slash commands use the application command tree that worked in earlier VC Manager versions. All replies use Components V2 layouts with the active theme; history adds button callbacks to its layout.
 - Persistent settings use Nighty's configuration store for simple values and JSON files under `getScriptsPath()` for session history and managed accounts.
 - Secondary accounts do not become additional Nighty clients. Each one opens its own authenticated Discord Gateway and voice connection managed by this script.
 
@@ -124,7 +126,7 @@ The main runtime path is:
 Nighty loads VCManager.py
   -> @nightyScript initializes the script
   -> CUI registers the VC Manager tab
-  -> bot_app synchronizes /vc commands
+  -> VC Manager synchronizes /vc commands
   -> a dashboard action or slash command updates managed state
   -> Discord Gateway and voice WebSocket tasks apply the change
   -> JSON storage records settings and session history
@@ -152,7 +154,7 @@ The script registers `/vc` after Nighty finishes connecting. If Discord does not
 | `/vc stream` | `state: enable/disable` | Set screen-share state. |
 | `/vc camera` | `state: enable/disable` | Set camera state. |
 | `/vc list` | None | List users in the managed voice channel. |
-| `/vc history` | None | Show the five most recent tracked sessions. |
+| `/vc history` | Optional `page` | Browse all tracked sessions with previous and next buttons. |
 | `/vc status` | None | Show the managed connection state. |
 | `/vc stats` | None | Show total voice time, session statistics, and managed-account usage. |
 | `/vc settings` | Optional booleans | View or change slash-response settings. |
@@ -177,7 +179,7 @@ VC Manager creates these files under Nighty's `json` script-data directory:
 ```text
 vc_manager_data.json      Session history, timers, automation, and slash settings
 vc_manager_tokens.json    Secondary account tokens and labels
-slashapi_state.json       Slash-command definition fingerprint
+slashapi_state.json        Saved /vc command definition fingerprint
 ```
 
 Do not commit or share these files. `vc_manager_tokens.json` contains usable Discord account tokens in plain text.
@@ -188,7 +190,7 @@ Do not commit or share these files. `vc_manager_tokens.json` contains usable Dis
 - One Discord account can hold one voice state per server. Use a secondary account for two channels in the same server.
 - Channel-status editing requires Discord's **Voice Channel Status** permission for the connected channel.
 - The script depends on private Nighty and Discord behavior. Client or API updates can break individual controls.
-- Slash commands require Nighty's embedded application-command client. The CUI dashboard can still load when that client is unavailable.
+- Slash commands require Nighty's application command tree and Components V2. The CUI dashboard can still load when those are unavailable.
 - Global slash-command changes can take time to appear in Discord's cache.
 
 ## Troubleshooting
@@ -203,7 +205,7 @@ Update to the latest script and reload the Nighty tab. The CUI recovery layer su
 <details>
 <summary><strong>The /vc command does not appear</strong></summary>
 
-Wait for the Nighty console to report a successful slash sync, then reload Discord with `Ctrl+R`. Restart Nighty if an old script generation still owns the command. Confirm that your Nighty build exposes `bot_app`.
+Wait for VC Manager's command sync, then reload Discord with `Ctrl+R`. Repeated script reloads can hit Discord's application-command rate limit and delay the menu update. Check the Nighty console for a sync error. Confirm that your Nighty build exposes `bot_app.tree`.
 
 </details>
 
@@ -248,7 +250,7 @@ Check the token, account access to the server, and channel permissions. Remove a
 - **@rico** for the project and primary development
 - **@snowy** and **@factz** for script development
 - [vahrervert/cui](https://github.com/vahrervert/cui) and CUI creator **cpores** for the Nighty UI foundation
-- [lord-m1nx/nighty-slash-api](https://github.com/lord-m1nx/nighty-slash-api) for the Nighty slash-command framework used as the integration reference
+- [lord-m1nx/nighty-slash-api](https://github.com/lord-m1nx/nighty-slash-api) for the integration used in earlier versions
 - **nes**, Nighty's owner, for the Nighty Themes V2 layout format used by Components V2 responses
 - [Hardik Pandya's Stop Slop](https://github.com/hardikpandya/stop-slop) for the prose checklist used on this README
 

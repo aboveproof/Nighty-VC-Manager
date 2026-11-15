@@ -3,7 +3,7 @@
 # Voice controls, session data, and multi-token account management for Nighty
 
 @nightyScript(
-    name="VC Manager v4.4.2",
+    name="VC Manager v4.5.6",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
     usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
@@ -24,7 +24,7 @@ def vc_manager_farm_script():
     /vc stream <state>      - Explicitly enable or disable screen share
     /vc camera <state>      - Explicitly enable or disable camera video
     /vc list                - List current participants
-    /vc history [page]      - Browse saved session history
+    /vc history [page]      - Browse saved sessions with buttons
     /vc status              - Show the managed connection state
     /vc stats               - Show tracked voice usage statistics
     /vc settings            - View or update slash-response settings
@@ -32,8 +32,7 @@ def vc_manager_farm_script():
 
     DEPENDENCIES:
     - aiohttp (normally bundled with Nighty; install with: pip install aiohttp)
-    - Slash registration is adapted from lord-m1nx/nighty-slash-api and is
-      included directly in this script; no additional package is required.
+    - Slash commands use Nighty's application command tree.
 
     NOTES:
     - Slash responses use Discord Components V2 and the active Nighty V2 theme.
@@ -78,7 +77,7 @@ def vc_manager_farm_script():
 
     import aiohttp
 
-    SCRIPT_VERSION = "4.4.2"
+    SCRIPT_VERSION = "4.5.6"
     PROJECT_URL = "https://github.com/aboveproof/Nighty-VC-Manager"
     VERSION_SOURCE_URL = (
         "https://raw.githubusercontent.com/aboveproof/Nighty-VC-Manager/main/VCManager.py"
@@ -2841,6 +2840,8 @@ def vc_manager_farm_script():
             self._gateway_generation = 0
             self._heartbeat_acknowledged = True
             self._restore_task = None
+            self._stream_start_task = None
+            self._stream_start_target = None
             self._terminal_failure = False
             self._unexpected_voice_losses = 0
             self._last_logged_error = ""
@@ -3140,6 +3141,49 @@ def vc_manager_farm_script():
             if self._restore_task and not self._restore_task.done():
                 self._restore_task.cancel()
             self._restore_task = None
+            if self._stream_start_task and not self._stream_start_task.done():
+                self._stream_start_task.cancel()
+            self._stream_start_task = None
+            self._stream_start_target = None
+
+        def _schedule_stream_start(self):
+            if not self.desired_streaming or not self.desired_channel_id:
+                return None
+            target = (self.desired_guild_id, self.desired_channel_id)
+            if self._stream_start_task and not self._stream_start_task.done():
+                if self._stream_start_target == target:
+                    return self._stream_start_task
+                self._stream_start_task.cancel()
+            guild_id = self.desired_guild_id
+            channel_id = self.desired_channel_id
+            generation = self._gateway_generation
+
+            async def start_after_join():
+                try:
+                    await asyncio.sleep(4)
+                    if (
+                        self._closing or not self.desired_streaming
+                        or self._gateway_generation != generation
+                        or self.current_guild_id != guild_id
+                        or self.current_channel_id != channel_id
+                        or not self.ws or self.ws.closed
+                    ):
+                        return
+                    await self.ws.send_json({
+                        "op": 18,
+                        "d": {
+                            "type": "guild", "guild_id": guild_id,
+                            "channel_id": channel_id, "preferred_region": None,
+                        },
+                    })
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    print(f"[VC Manager] Could not restore screen share for {self.name}: {error}", type_="ERROR")
+
+            self._stream_start_task = safe_create_task(start_after_join())
+            self._stream_start_target = target
+            return self._stream_start_task
 
         async def _channel_access_error(self, channel_id):
             """Return a plain-language channel access error, or an empty string."""
@@ -3235,16 +3279,6 @@ def vc_manager_farm_script():
                         "self_video": self.desired_camera,
                     },
                 })
-                if self.desired_streaming:
-                    await self.ws.send_json({
-                        "op": 18,
-                        "d": {
-                            "type": "guild",
-                            "guild_id": self.desired_guild_id,
-                            "channel_id": self.desired_channel_id,
-                            "preferred_region": None,
-                        },
-                    })
                 return True
             except Exception as error:
                 print(f"[VC Manager] Could not restore voice for {self.name}: {error}", type_="ERROR")
@@ -3520,11 +3554,15 @@ def vc_manager_farm_script():
                             self._set_status("Ready")
                             if self.desired_channel_id:
                                 self._schedule_voice_restore()
+                                if self.is_in_vc and self.desired_streaming:
+                                    self._schedule_stream_start()
                         elif t == "RESUMED":
                             self._reconnect_attempts = 0
                             self._set_status("Connected" if self.desired_channel_id else "Ready")
                             if self.desired_channel_id:
                                 self._schedule_voice_restore()
+                                if self.is_in_vc and self.desired_streaming:
+                                    self._schedule_stream_start()
                         elif t == "VOICE_STATE_UPDATE":
                             if self.user_id and str(d.get("user_id")) == self.user_id:
                                 was_in_vc = self.is_in_vc
@@ -3568,9 +3606,11 @@ def vc_manager_farm_script():
                                     self._unexpected_voice_losses = 0
                                     self.is_muted = bool(d.get("self_mute", self.is_muted))
                                     self.is_deafened = bool(d.get("self_deaf", self.is_deafened))
-                                    self.is_streaming = bool(d.get("self_stream", self.is_streaming))
+                                    self.is_streaming = bool(d.get("self_stream", False)) or self.desired_streaming
                                     self.is_camera_on = bool(d.get("self_video", self.is_camera_on))
                                     self._set_status("Connected")
+                                    if self.desired_streaming and (not was_in_vc or previous_channel_id != str(channel_id)):
+                                        self._schedule_stream_start()
                         elif op == 7:
                             self._set_status("Reconnecting")
                             await gateway_ws.close()
@@ -3682,6 +3722,8 @@ def vc_manager_farm_script():
 
             if self.is_in_vc and self.current_channel_id == str(channel_id):
                 self.set_desired_voice(guild_id, channel_id, mute, deaf, stream, video)
+                if self.desired_streaming:
+                    self._schedule_stream_start()
                 self._begin_voice_session(guild_id, channel_id)
                 self._set_status("Connected")
                 state_saved = update_saved_token(
@@ -3691,7 +3733,7 @@ def vc_manager_farm_script():
                     stay_connected=True,
                     muted=self.is_muted,
                     deafened=self.is_deafened,
-                    streaming=self.is_streaming,
+                    streaming=self.desired_streaming,
                     camera_on=self.is_camera_on,
                 )
                 if not state_saved:
@@ -3735,19 +3777,8 @@ def vc_manager_farm_script():
                 if self.desired_channel_id != str(channel_id):
                     return False
                 if self.is_in_vc and self.current_channel_id == str(channel_id):
-                    if self.is_streaming:
-                        try:
-                            await self.ws.send_json({
-                                "op": 18,
-                                "d": {
-                                    "type": "guild",
-                                    "guild_id": str(guild_id),
-                                    "channel_id": str(channel_id),
-                                    "preferred_region": None
-                                }
-                            })
-                        except Exception as e:
-                            print(f"[VC Manager] Stream-state request failed for {self.name}: {e}", type_="ERROR")
+                    if self.desired_streaming:
+                        self._schedule_stream_start()
                     self._set_status("Connected")
                     state_saved = update_saved_token(
                         self.record_id,
@@ -3756,7 +3787,7 @@ def vc_manager_farm_script():
                         stay_connected=True,
                         muted=self.is_muted,
                         deafened=self.is_deafened,
-                        streaming=self.is_streaming,
+                        streaming=self.desired_streaming,
                         camera_on=self.is_camera_on,
                     )
                     if not state_saved:
@@ -3831,6 +3862,12 @@ def vc_manager_farm_script():
                 self.is_streaming,
                 self.is_camera_on,
             )
+            old_desired_state = (
+                self.desired_muted,
+                self.desired_deafened,
+                self.desired_streaming,
+                self.desired_camera,
+            )
             if mute is not None:
                 self.is_muted = as_bool(mute)
                 self.desired_muted = self.is_muted
@@ -3886,6 +3923,12 @@ def vc_manager_farm_script():
                     self.is_streaming,
                     self.is_camera_on,
                 ) = old_state
+                (
+                    self.desired_muted,
+                    self.desired_deafened,
+                    self.desired_streaming,
+                    self.desired_camera,
+                ) = old_desired_state
                 print(f"[VC Manager] Voice control update failed for {self.name}: {e}", type_="ERROR")
                 self._set_status("Control failed", "Discord rejected this account's voice control update.")
                 return False
@@ -3945,6 +3988,8 @@ def vc_manager_farm_script():
                 self.watchdog_task.cancel()
             if self._restore_task:
                 self._restore_task.cancel()
+            if self._stream_start_task:
+                self._stream_start_task.cancel()
             if self.ws and not self.ws.closed:
                 await self.ws.close()
             if self.http_session and not self.http_session.closed:
@@ -4435,6 +4480,28 @@ def vc_manager_farm_script():
             print(f"[VC Manager] Error sending stream state: {e}", type_="ERROR")
             return False
 
+    def schedule_primary_stream_start(guild_id, channel_id):
+        guild_id, channel_id = str(guild_id), str(channel_id)
+        existing = runtime_state.get("primary_stream_start")
+        if existing and not existing.done():
+            if runtime_state.get("primary_stream_target") == (guild_id, channel_id):
+                return existing
+            existing.cancel()
+
+        async def start_after_join():
+            await asyncio.sleep(4)
+            current = get_current_voice_channel()
+            if not is_streaming or not current:
+                return False
+            if str(current.guild.id) != guild_id or str(current.id) != channel_id:
+                return False
+            return await send_stream_state(guild_id, channel_id, True)
+
+        task = safe_create_task(start_after_join())
+        runtime_state["primary_stream_start"] = task
+        runtime_state["primary_stream_target"] = (guild_id, channel_id)
+        return task
+
     async def send_voice_state(guild_id, channel_id, update_stream=False):
         nonlocal is_muted, is_deafened, is_streaming, is_camera_on
         requested_stream_state = bool(is_streaming)
@@ -4727,6 +4794,7 @@ def vc_manager_farm_script():
 
             # Connected or switched
             if new_channel:
+                joined_now = connection_start_time is None or not old_channel or old_channel.id != new_channel.id
                 previous_controls = (
                     is_muted,
                     is_deafened,
@@ -4752,8 +4820,14 @@ def vc_manager_farm_script():
 
                 is_muted = bool(getattr(after, "self_mute", False) or getattr(after, "mute", False))
                 is_deafened = bool(getattr(after, "self_deaf", False) or getattr(after, "deaf", False))
-                is_streaming = bool(getattr(after, "self_stream", False) or getattr(after, "streaming", False))
+                # The first join event precedes Discord's separate stream packet.
+                # Keep the saved request until the stream can be started.
+                is_streaming = is_streaming or bool(
+                    getattr(after, "self_stream", False) or getattr(after, "streaming", False)
+                )
                 is_camera_on = bool(getattr(after, "self_video", False))
+                if is_streaming and joined_now:
+                    schedule_primary_stream_start(new_channel.guild.id, new_channel.id)
 
                 current_controls = (
                     is_muted,
@@ -4811,18 +4885,17 @@ def vc_manager_farm_script():
 
     runtime_state["listeners"].append(("on_voice_state_update", handle_voice_state_update))
 
-    # ==================== NIGHTY SLASH API + COMPONENTS V2 ====================
+    # ==================== SLASH COMMANDS + COMPONENTS V2 ====================
 
-    # Adapted from lord-m1nx/nighty-slash-api. Nighty injects `discord`,
-    # `app_commands`, and `bot_app`, so this script uses those objects.
+    # Nighty supplies its command and Discord objects when the script loads.
     try:
-        discord_api = discord
+        discord_api = discord_bot
     except NameError:
         discord_api = None
     try:
         app_commands_api = app_commands
     except NameError:
-        app_commands_api = getattr(discord_api, "app_commands", None) if discord_api else None
+        app_commands_api = None
     try:
         slash_bot_app = bot_app
     except NameError:
@@ -4835,9 +4908,6 @@ def vc_manager_farm_script():
             except Exception as error:
                 print(f"[VC Manager] Could not remove a stale slash listener: {error}", type_="ERROR")
     runtime_state["app_listeners"] = []
-
-    COMPONENTS_V2_FLAG = 1 << 15
-    EPHEMERAL_FLAG = 1 << 6
 
     # Remove legacy VC text commands left in Nighty's registry after a reload.
     for legacy_command_name in (
@@ -4960,6 +5030,50 @@ def vc_manager_farm_script():
             container["accent_color"] = accent_color
         return [container]
 
+    def themed_layout_container(content, footer=None):
+        """Render the active Themes V2 layout in a native interactive view."""
+        if not get_slash_response_settings()["use_theme"]:
+            container = discord_api.ui.Container()
+            container.add_item(discord_api.ui.TextDisplay(content))
+            if footer:
+                container.add_item(discord_api.ui.Separator())
+                container.add_item(discord_api.ui.TextDisplay(footer))
+            return container
+
+        theme = slash_theme_layout(content, footer=footer)[0]
+        accent = theme.get("accent_color")
+        container = discord_api.ui.Container(accent_color=accent) if accent is not None else discord_api.ui.Container()
+        for item in theme.get("components", [])[:35]:
+            kind = item.get("type")
+            if kind == 10:
+                container.add_item(discord_api.ui.TextDisplay(item.get("content") or " "))
+            elif kind == 14:
+                spacing_type = getattr(discord_api, "SeparatorSpacing", None)
+                if spacing_type:
+                    spacing = spacing_type.large if item.get("spacing") == 2 else spacing_type.small
+                    container.add_item(discord_api.ui.Separator(spacing=spacing))
+                else:
+                    container.add_item(discord_api.ui.Separator())
+            elif kind == 9:
+                section_text = (item.get("components") or [{}])[0].get("content") or " "
+                image_url = ((item.get("accessory") or {}).get("media") or {}).get("url")
+                if image_url:
+                    container.add_item(discord_api.ui.Section(
+                        discord_api.ui.TextDisplay(section_text),
+                        accessory=discord_api.ui.Thumbnail(image_url),
+                    ))
+                else:
+                    container.add_item(discord_api.ui.TextDisplay(section_text))
+            elif kind == 12:
+                gallery = discord_api.ui.MediaGallery()
+                for media in item.get("items", [])[:10]:
+                    image_url = (media.get("media") or {}).get("url")
+                    if image_url:
+                        gallery.add_item(media=image_url)
+                if gallery.items:
+                    container.add_item(gallery)
+        return container
+
     class VCSlashContext:
         """Slash API context with native Components V2 response support."""
         def __init__(self, interaction):
@@ -4971,85 +5085,36 @@ def vc_manager_farm_script():
         def user(self):
             return getattr(self.interaction, "user", None)
 
-        async def _fallback_embed(self, title, description, ephemeral=True):
-            content = f"**{title}**\n{description}" if title else description
-            content = content.replace("@", "@\u200b")
-            response = getattr(self.interaction, "response", None)
-            if response and not response.is_done():
-                self._done = True
-                return await response.send_message(content=content[:2000], ephemeral=ephemeral)
-            followup = getattr(self.interaction, "followup", None)
-            if followup:
-                return await followup.send(content=content[:2000], ephemeral=ephemeral)
-            return None
-
         async def send_v2(self, title, description, ephemeral=None, footer=None):
             if ephemeral is None:
                 ephemeral = get_slash_response_settings()["ephemeral"]
             content = f"## {title}\n{description}" if title else description
-            interaction_id = str(getattr(self.interaction, "id", "") or "")
-            interaction_token = str(getattr(self.interaction, "token", "") or "")
-            if interaction_id and interaction_token and not self._done:
-                payload = {
-                    "type": 4,
-                    "data": {
-                        "flags": COMPONENTS_V2_FLAG | (EPHEMERAL_FLAG if ephemeral else 0),
-                        "components": slash_theme_layout(content, footer=footer),
-                        "allowed_mentions": {"parse": []}
-                    }
-                }
-                url = f"https://discord.com/api/v10/interactions/{interaction_id}/{interaction_token}/callback"
-                try:
-                    timeout = aiohttp.ClientTimeout(total=10)
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
-                        async with session.post(url, json=payload) as response:
-                            if response.status in (200, 204):
-                                self._done = True
-                                self._ephemeral = ephemeral
-                                return True
-                            detail = (await response.text())[:300]
-                            print(f"[VC Manager] Components V2 response rejected ({response.status}): {detail}", type_="ERROR")
-                except Exception as e:
-                    print(f"[VC Manager] Components V2 response failed: {e}", type_="ERROR")
-            fallback_description = description if footer is None else f"{description}\n\n{footer}"
-            await self._fallback_embed(title, fallback_description, ephemeral=ephemeral)
-            self._done = True
-            return False
+            view = discord_api.ui.LayoutView()
+            view.add_item(themed_layout_container(content, footer=footer))
+            return await self.send_layout(view, private=ephemeral)
 
-        async def edit_v2(self, title, description):
-            content = f"## {title}\n{description}" if title else description
-            interaction_token = str(getattr(self.interaction, "token", "") or "")
-            application_id = getattr(self.interaction, "application_id", None)
-            if not application_id and slash_bot_app:
-                application_id = getattr(getattr(slash_bot_app, "user", None), "id", None)
-            if not application_id or not interaction_token:
-                return False
-            url = (
-                f"https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}"
-                "/messages/@original?with_components=true"
-            )
-            try:
-                timeout = aiohttp.ClientTimeout(total=10)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.patch(
-                        url,
-                        json={"components": slash_theme_layout(content), "allowed_mentions": {"parse": []}}
-                    ) as response:
-                        if response.status == 200:
-                            return True
-                        detail = (await response.text())[:300]
-                        print(f"[VC Manager] Components V2 edit rejected ({response.status}): {detail}", type_="ERROR")
-            except Exception as e:
-                print(f"[VC Manager] Components V2 edit failed: {e}", type_="ERROR")
-            return False
+        async def send_layout(self, view, private=None):
+            if private is None:
+                private = get_slash_response_settings()["ephemeral"]
+            response = self.interaction.response
+            if not response.is_done():
+                result = await response.send_message(view=view, ephemeral=private)
+            elif (
+                response.type == discord_api.InteractionResponseType.deferred_channel_message
+                and not self.interaction.extras.get("v2_placeholder_used")
+            ):
+                self.interaction.extras["v2_placeholder_used"] = True
+                result = await self.interaction.edit_original_response(view=view)
+            else:
+                result = await self.interaction.followup.send(view=view, ephemeral=private)
+            self._done = True
+            return result
 
         async def error(self, message):
-            if self._done:
-                return await self.edit_v2("VC Manager", message)
             return await self.send_v2("VC Manager", message)
 
     class SlashAPI:
-        """Focused Nighty Slash API adapter for this script's command group."""
+        """Register the /vc group through Nighty's application command tree."""
         def __init__(self, label):
             self.label = label
             self.registered = []
@@ -5063,7 +5128,12 @@ def vc_manager_farm_script():
 
         @property
         def available(self):
-            return self._tree is not None and app_commands_api is not None and discord_api is not None
+            return (
+                self._tree is not None
+                and app_commands_api is not None
+                and discord_api is not None
+                and getattr(getattr(discord_api, "ui", None), "LayoutView", None) is not None
+            )
 
         def _wrap(self, func):
             @functools.wraps(func)
@@ -5073,8 +5143,10 @@ def vc_manager_farm_script():
                     return await func(ctx, *args, **kwargs)
                 except Exception as e:
                     print(f"[VC Manager Slash] {func.__name__} failed: {e}", type_="ERROR")
-                    if not ctx._done:
+                    try:
                         await ctx.error("The command could not be completed.")
+                    except Exception as response_error:
+                        print(f"[VC Manager Slash] Could not show command error: {response_error}", type_="ERROR")
 
             try:
                 signature = inspect.signature(func)
@@ -5099,33 +5171,18 @@ def vc_manager_farm_script():
             except Exception:
                 pass
             group_obj = app_commands_api.Group(name=name, description=description[:100])
-
-    # Discord reads context and install decorators from the top-level group.
-            allowed_contexts = getattr(app_commands_api, "allowed_contexts", None)
-            if callable(allowed_contexts):
+            contexts = getattr(app_commands_api, "allowed_contexts", None)
+            if callable(contexts):
                 try:
-                    group_obj = allowed_contexts(
-                        guilds=True,
-                        dms=True,
-                        private_channels=True
-                    )(group_obj)
-                except Exception as e:
-                    print(f"[VC Manager Slash] Could not enable all command contexts: {e}", type_="ERROR")
-
-            allowed_installs = getattr(app_commands_api, "allowed_installs", None)
-            if callable(allowed_installs):
+                    group_obj = contexts(guilds=True, dms=True, private_channels=True)(group_obj)
+                except Exception as error:
+                    print(f"[VC Manager Slash] Command contexts failed: {error}", type_="ERROR")
+            installs = getattr(app_commands_api, "allowed_installs", None)
+            if callable(installs):
                 try:
-                    group_obj = allowed_installs(guilds=True, users=True)(group_obj)
-                except Exception as e:
-                    print(f"[VC Manager Slash] Could not enable user installs: {e}", type_="ERROR")
-            else:
-                user_install = getattr(app_commands_api, "user_install", None)
-                if callable(user_install):
-                    try:
-                        group_obj = user_install()(group_obj)
-                    except Exception as e:
-                        print(f"[VC Manager Slash] Could not enable user installs: {e}", type_="ERROR")
-
+                    group_obj = installs(guilds=True, users=True)(group_obj)
+                except Exception as error:
+                    print(f"[VC Manager Slash] User installs failed: {error}", type_="ERROR")
             self._tree.add_command(group_obj)
             self.registered.append(name)
             return SlashGroup(self, group_obj)
@@ -5136,7 +5193,6 @@ def vc_manager_farm_script():
 
         def autosync(self):
             if not self.available:
-                print("[VC Manager Slash] bot_app command tree is unavailable.", type_="ERROR")
                 return
 
             async def runner():
@@ -5159,12 +5215,14 @@ def vc_manager_farm_script():
                         self._session_synced = True
                         state[self.label] = {
                             "fingerprint": current,
-                            "commands": list(self.registered)
+                            "commands": list(self.registered),
                         }
                         with open(self._state_path, "w", encoding="utf-8") as file:
                             json.dump(state, file, indent=2)
-                except Exception as e:
-                    print(f"[VC Manager Slash] Auto-sync failed: {e}", type_="ERROR")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    print(f"[VC Manager Slash] Auto-sync failed: {error}", type_="ERROR")
 
             safe_create_task(runner())
 
@@ -5172,6 +5230,10 @@ def vc_manager_farm_script():
         def __init__(self, api, group_obj):
             self.api = api
             self.group = group_obj
+
+        @property
+        def name(self):
+            return self.group.name
 
         def command(self, name, description, describe=None):
             def decorator(func):
@@ -5187,19 +5249,24 @@ def vc_manager_farm_script():
                     params.append({
                         "name": parameter.name,
                         "annotation": getattr(parameter.annotation, "__name__", str(parameter.annotation)),
-                        "required": parameter.default is inspect.Parameter.empty
+                        "required": parameter.default is inspect.Parameter.empty,
                     })
                 self.api._shapes.append({
                     "parent": self.group.name,
                     "name": name,
                     "description": description,
-                    "params": params
+                    "params": params,
                 })
                 return result
             return decorator
 
     slash = SlashAPI(label="VCManager")
     vc_group = slash.group("vc", "Control VC Manager voice sessions") if slash.available else None
+    if vc_group is None:
+        print(
+            "[VC Manager] Slash commands need Nighty's application command tree and Components V2. The VC Manager tab can still be used.",
+            type_="ERROR",
+        )
 
     async def slash_owner_only(ctx):
         caller_id = getattr(ctx.user, "id", None)
@@ -5247,11 +5314,12 @@ def vc_manager_farm_script():
             target = find_voice_channel(channel, getattr(ctx.interaction, "guild", None))
             if not target or not getattr(target, "guild", None):
                 return await ctx.error(f"Could not find voice channel `{channel}`.")
-            await ctx.send_v2("VC Manager", f"Connecting to {format_channel_name(target.name)} in **{target.guild.name}**...")
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.defer(thinking=True, ephemeral=ctx._ephemeral)
             if await connect(target.guild.id, target.id):
-                await ctx.edit_v2("Connected", f"VC Manager joined {format_channel_name(target.name)} in **{target.guild.name}**.")
+                await ctx.send_v2("Connected", f"VC Manager joined {format_channel_name(target.name)} in **{target.guild.name}**.")
             else:
-                await ctx.edit_v2("Connection Failed", "Discord rejected the voice join request.")
+                await ctx.send_v2("Connection Failed", "Discord rejected the voice join request.")
 
         @vc_group.command(
             name="load",
@@ -5268,7 +5336,8 @@ def vc_manager_farm_script():
             if not target or not guild:
                 return await ctx.error(f"Could not find voice channel `{channel_id}`.")
 
-            await ctx.send_v2("VC Manager", f"Loading {format_channel_name(target.name)} with all voice controls...")
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.defer(thinking=True, ephemeral=ctx._ephemeral)
             old_state = (is_muted, is_deafened, is_streaming, is_camera_on)
             is_muted = is_deafened = is_streaming = is_camera_on = True
             intentional_disconnect = False
@@ -5277,7 +5346,7 @@ def vc_manager_farm_script():
                 is_muted, is_deafened, is_streaming, is_camera_on = old_state
                 set_managed_target()
                 update_all_ui()
-                return await ctx.edit_v2("Connection Failed", "Discord rejected the voice join request.")
+                return await ctx.send_v2("Connection Failed", "Discord rejected the voice join request.")
 
             joined = False
             for _ in range(100):
@@ -5289,20 +5358,17 @@ def vc_manager_farm_script():
 
             stream_started = False
             if joined:
-                for _ in range(3):
-                    if await send_stream_state(guild.id, target.id, True):
-                        stream_started = True
-                        break
-                    await asyncio.sleep(0.25)
+                stream_task = schedule_primary_stream_start(guild.id, target.id)
+                stream_started = bool(await stream_task)
             else:
                 set_managed_target()
 
-            is_streaming = stream_started
+            is_streaming = True
             data = load_data()
             data["settings"].update({
                 "muted": True,
                 "deafened": True,
-                "streaming": stream_started,
+                "streaming": True,
                 "camera_on": True
             })
             save_data(data)
@@ -5311,21 +5377,21 @@ def vc_manager_farm_script():
                 await sync_managed_voice_controls(
                     mute=True,
                     deaf=True,
-                    stream=stream_started,
+                    stream=True,
                     video=True,
                 )
 
             if not joined:
-                await ctx.edit_v2("Connection Failed", f"Discord did not confirm {format_channel_name(target.name)}.")
+                await ctx.send_v2("Connection Failed", f"Discord did not confirm {format_channel_name(target.name)}.")
             elif stream_started:
-                await ctx.edit_v2(
+                await ctx.send_v2(
                     "Voice Channel Loaded",
                     f"Joined {format_channel_name(target.name)} with mute, deafen, stream, and camera enabled."
                 )
             else:
-                await ctx.edit_v2(
+                await ctx.send_v2(
                     "Voice Channel Loaded",
-                    f"Joined {format_channel_name(target.name)} with mute, deafen, and camera. Discord rejected screen share."
+                    f"Joined {format_channel_name(target.name)} with mute, deafen, and camera. Screen share could not be started now; VC Manager kept it enabled for the next reconnect."
                 )
 
         @vc_group.command(name="leave", description="Disconnect the VC Manager voice session")
@@ -5334,9 +5400,10 @@ def vc_manager_farm_script():
                 return
             if not is_actually_connected():
                 return await ctx.error("VC Manager is not connected.")
-            await ctx.send_v2("VC Manager", "Disconnecting the managed voice session...")
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.defer(thinking=True, ephemeral=ctx._ephemeral)
             if await disconnect_from_voice(intentional=True):
-                await ctx.edit_v2("Disconnected", "VC Manager left the voice channel.")
+                await ctx.send_v2("Disconnected", "VC Manager left the voice channel.")
             else:
                 await ctx.error("Could not send the disconnect request.")
 
@@ -5357,10 +5424,11 @@ def vc_manager_farm_script():
                     f"{label} Unchanged",
                     f"{label} is already **{current_state}**."
                 )
-            await ctx.send_v2("VC Manager", "Updating the managed voice state...")
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.defer(thinking=True, ephemeral=ctx._ephemeral)
             kwargs = {setting: enabled}
             if await update_voice_state(**kwargs):
-                await ctx.edit_v2("Voice Control Updated", f"**{label}:** {'Enabled' if enabled else 'Disabled'}")
+                await ctx.send_v2("Voice Control Updated", f"**{label}:** {'Enabled' if enabled else 'Disabled'}")
             else:
                 await ctx.error("Discord rejected the voice-state update.")
 
@@ -5413,7 +5481,7 @@ def vc_manager_farm_script():
         def history_page(page):
             sessions = get_primary_session_history(include_live=True)
             if not sessions:
-                return "No voice sessions.", None
+                return "No voice sessions.", 1, 1, 0
             page_size = 5
             total_pages = max(1, math.ceil(len(sessions) / page_size))
             page = min(max(int(page), 1), total_pages)
@@ -5426,10 +5494,54 @@ def vc_manager_farm_script():
                 for session in page_sessions
             ]
             content = "\n\n".join(lines)
-            footer = f"**Page:** {page} / {total_pages}  |  **Sessions:** {len(sessions)}"
-            if total_pages > 1:
-                footer += "\nUse `/vc history page:<number>` to change pages."
-            return content, footer
+            return content, page, total_pages, len(sessions)
+
+        class HistoryView(discord_api.ui.LayoutView):
+            def __init__(self, owner_id, page=1):
+                super().__init__(timeout=300)
+                self.owner_id = str(owner_id)
+                self.page = page
+                self.render()
+
+            def render(self):
+                self.clear_items()
+                content, self.page, total_pages, session_count = history_page(self.page)
+                previous = discord_api.ui.Button(
+                    label="<", style=discord_api.ButtonStyle.secondary,
+                    disabled=self.page <= 1,
+                )
+                position = discord_api.ui.Button(
+                    label=f"{self.page} / {total_pages}",
+                    style=discord_api.ButtonStyle.secondary, disabled=True,
+                )
+                following = discord_api.ui.Button(
+                    label=">", style=discord_api.ButtonStyle.secondary,
+                    disabled=self.page >= total_pages,
+                )
+                previous.callback = self.on_previous
+                following.callback = self.on_next
+                container = themed_layout_container(
+                    f"## Voice Session History\n{content}",
+                    footer=f"**Sessions:** {session_count}",
+                )
+                container.add_item(discord_api.ui.ActionRow(previous, position, following))
+                self.add_item(container)
+
+            async def change_page(self, interaction, delta):
+                if str(getattr(getattr(interaction, "user", None), "id", "")) != self.owner_id:
+                    await interaction.response.send_message(
+                        "Only the Nighty account owner can use these buttons.", ephemeral=True,
+                    )
+                    return
+                self.page += delta
+                self.render()
+                await interaction.response.edit_message(view=self)
+
+            async def on_previous(self, interaction):
+                await self.change_page(interaction, -1)
+
+            async def on_next(self, interaction):
+                await self.change_page(interaction, 1)
 
         @vc_group.command(
             name="history",
@@ -5439,8 +5551,12 @@ def vc_manager_farm_script():
         async def slash_vc_history(ctx, page: int = 1):
             if not await slash_owner_only(ctx):
                 return
-            content, footer = history_page(page)
-            await ctx.send_v2("Voice Session History", content, footer=footer)
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.defer(
+                    thinking=True,
+                    ephemeral=get_slash_response_settings()["ephemeral"],
+                )
+            await ctx.send_layout(HistoryView(ctx.user.id, page))
 
         @vc_group.command(name="status", description="Show the managed voice connection state")
         async def slash_vc_status(ctx):
@@ -5572,15 +5688,14 @@ def vc_manager_farm_script():
                 + f"**Ephemeral responses:** {setting_label(settings['ephemeral'])}\n"
                 + f"**Nighty V2 theme:** {setting_label(settings['use_theme'])}\n"
                 + f"**Detailed status:** {setting_label(settings['detailed_status'])}\n\n"
-                + "Use `/vc settings` options to change these values."
+                + f"Use `/{vc_group.name} settings` options to change these values."
             )
 
         @vc_group.command(name="help", description="Show all VC Manager slash commands")
         async def slash_vc_help(ctx):
             if not await slash_owner_only(ctx):
                 return
-            await ctx.send_v2(
-                "VC Manager Commands",
+            command_list = (
                 "`/vc join`: Join by channel ID or name\n"
                 "`/vc load`: Join with all voice controls enabled\n"
                 "`/vc leave`: Disconnect the managed session\n"
@@ -5589,10 +5704,14 @@ def vc_manager_farm_script():
                 "`/vc stream state:<enable|disable>`: Set screen share\n"
                 "`/vc camera state:<enable|disable>`: Set the camera state\n"
                 "`/vc list`: List channel participants\n"
-                "`/vc history page:<number>`: Browse saved sessions\n"
+                "`/vc history page:<number>`: Browse saved sessions with buttons\n"
                 "`/vc status`: Show connection details\n"
                 "`/vc stats`: Show tracked voice usage statistics\n"
                 "`/vc settings`: View or update response settings"
+            )
+            await ctx.send_v2(
+                "VC Manager Commands",
+                command_list.replace("`/vc ", f"`/{vc_group.name} "),
             )
 
         slash.autosync()
@@ -5608,7 +5727,7 @@ def vc_manager_farm_script():
     col1 = main.create_container(type="rows", width="auto", height="auto", gap=4)
 
     # Primary connection card
-    connection_card = col1.create_card(type="rows", height="auto", gap=3, disallow_shrink=True)
+    connection_card = col1.create_card(height="auto", gap=3, disallow_shrink=True)
     connection_card.create_ui_element(
         UI.Text,
         content=f"VC Manager v{SCRIPT_VERSION}",
@@ -5664,7 +5783,7 @@ def vc_manager_farm_script():
     ui_refs["leave_button"] = leave_button
 
     # Participants Card
-    participants_card = col1.create_card(type="rows", height="auto", gap=3, disallow_shrink=True)
+    participants_card = col1.create_card(height="auto", gap=3, disallow_shrink=True)
     participants_title = participants_card.create_ui_element(UI.Text, content="Channel Participants (0)", size="base", weight="bold")
     ui_refs["participants_title"] = participants_title
 
@@ -5682,7 +5801,7 @@ def vc_manager_farm_script():
     # Place connection and channel status on one row.
     status_row = col2.create_container(type="columns", width="full", height="auto", gap=4)
     # Give Voice Status its content width and Channel Status the remaining space.
-    status_card = status_row.create_card(type="rows", width="auto", height="auto", gap=2, disallow_shrink=True)
+    status_card = status_row.create_card(width="auto", height="auto", gap=2, disallow_shrink=True)
     status_card.create_ui_element(UI.Text, content="Voice Status", size="base", weight="bold")
 
     status_text = status_card.create_ui_element(UI.Text, content="🔴  Disconnected", size="base", weight="bold")
@@ -5703,7 +5822,7 @@ def vc_manager_farm_script():
     ui_refs["session_time_text"] = session_time_text
     ui_refs["total_time_text"] = total_time_text
 
-    channel_status_card = status_row.create_card(type="rows", width="full", height="auto", gap=2)
+    channel_status_card = status_row.create_card(width="full", height="auto", gap=2)
     channel_status_card.create_ui_element(UI.Text, content="Channel Status", size="base", weight="bold")
     voice_status_input = channel_status_card.create_ui_element(
         UI.Input,
@@ -5731,7 +5850,7 @@ def vc_manager_farm_script():
     ui_refs["clear_channel_status_btn"] = clear_channel_status_btn
 
     # Voice Controls Card
-    controls_card = col2.create_card(type="rows", height="auto", gap=3, disallow_shrink=True)
+    controls_card = col2.create_card(height="auto", gap=3, disallow_shrink=True)
     controls_card.create_ui_element(UI.Text, content="Voice Controls", size="lg", weight="bold")
 
     mute_toggle = controls_card.create_ui_element(UI.Toggle, label="Microphone Mute", checked=False)
@@ -5751,7 +5870,7 @@ def vc_manager_farm_script():
     # Full width gives both cards the same flex basis. CUI can measure a hidden
     # auto-width pager as a few pixels after a browser refresh.
     automation_card = automation_settings_row.create_card(
-        type="rows", width="full", height="auto", vertical_align="start", gap=3
+        width="full", height="auto", vertical_align="start", gap=3
     )
     automation_pager = CardPager(automation_card, max_height=300)
     automation_page = automation_pager.create_page()
@@ -5795,7 +5914,7 @@ def vc_manager_farm_script():
     # Command Settings Card
     command_settings = get_slash_response_settings()
     command_settings_card = automation_settings_row.create_card(
-        type="rows", width="full", height="auto", vertical_align="start", gap=3
+        width="full", height="auto", vertical_align="start", gap=3
     )
     command_settings_card.create_ui_element(
         UI.Text, content="Command Settings", size="lg", weight="bold"
@@ -5831,7 +5950,7 @@ def vc_manager_farm_script():
         type="columns", width="full", height="auto", gap=4
     )
 
-    token_card = multi_token_setup_row.create_card(type="rows", width="full", height="auto", gap=3)
+    token_card = multi_token_setup_row.create_card(width="full", height="auto", gap=3)
     token_pager = CardPager(token_card, max_height=320)
     token_pager_page = token_pager.create_page()
     token_add_page = token_pager_page.create_group(type="rows", gap=3, full_width=True)
@@ -5872,7 +5991,7 @@ def vc_manager_farm_script():
 
 
     destination_card = multi_token_setup_row.create_card(
-        type="rows", width="full", height="auto", gap=3
+        width="full", height="auto", gap=3
     )
     destination_card.create_ui_element(
         UI.Text, content="Account Destination", size="lg", weight="bold"
@@ -5938,7 +6057,7 @@ def vc_manager_farm_script():
     ui_refs["destination_refresh_button"] = destination_refresh_button
     ui_refs["destination_hint"] = destination_hint
 
-    tokens_table_card = multi_token_container.create_card(type="rows", width="full", height="auto", gap=3)
+    tokens_table_card = multi_token_container.create_card(width="full", height="auto", gap=3)
     tokens_table_card.create_ui_element(UI.Text, content="Managed Accounts", size="lg", weight="bold")
 
     managed_accounts_pager_id = f"vc-managed-accounts-pager-{id(tokens_table_card)}"
