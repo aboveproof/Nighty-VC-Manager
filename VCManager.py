@@ -3,7 +3,7 @@
 # Voice controls, session data, and multi-token account management for Nighty
 
 @nightyScript(
-    name="VC Manager v4.5.8",
+    name="VC Manager v4.6.0",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
     usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
@@ -76,7 +76,7 @@ def vc_manager_farm_script():
 
     import aiohttp
 
-    SCRIPT_VERSION = "4.5.8"
+    SCRIPT_VERSION = "4.6.0"
     PROJECT_URL = "https://github.com/aboveproof/Nighty-VC-Manager"
     VERSION_SOURCE_URL = (
         "https://raw.githubusercontent.com/aboveproof/Nighty-VC-Manager/main/VCManager.py"
@@ -163,6 +163,7 @@ def vc_manager_farm_script():
         "participant_sessions": previous_participant_sessions,
         "listeners": [],
         "backed_up_files": set(),
+        "profile_effect_assets": {},
         "generation": uuid.uuid4().hex
     }
     setattr(bot, runtime_key, runtime_state)
@@ -987,6 +988,7 @@ def vc_manager_farm_script():
                     .vc-token-account-submit:active { transform:translateY(1px); }
                     .vc-token-account-submit:focus-visible { outline:2px solid rgba(126,192,240,.9); outline-offset:2px; }
                     .vc-token-account-submit:disabled { cursor:wait; opacity:.68; }
+                    .vc-token-account-error { display:none; margin-top:8px; color:#f38ba8; font-size:12px; line-height:1.4; }
                     @media (max-width:640px) { .vc-token-account-form { min-height:0; } .vc-token-account-actions { margin-top:4px; } .vc-token-account-submit { min-height:44px; } }
                 </style>
                 <div id="${data.form_id}" class="vc-token-account-form" data-vc-token-form>
@@ -1001,6 +1003,7 @@ def vc_manager_farm_script():
                     <div class="vc-token-account-actions">
                         <button type="button" class="vc-token-account-submit" data-vc-token-submit onclick="window.VCManagerTokenForm.submit(this)">Add Account</button>
                     </div>
+                    <div class="vc-token-account-error" data-vc-token-error role="status"></div>
                     <button type="button" data-vc-token-proxy onclick="${on_add}" style="display:none;"></button>
                 </div>
             """
@@ -1349,7 +1352,7 @@ def vc_manager_farm_script():
 
     VC_UI_JS = """
     (function() {
-        const uiVersion = 'vc-manager-ui-v10';
+        const uiVersion = 'vc-manager-ui-v11';
         if (
             window.VCManagerUIVersion === uiVersion &&
             (window.VCManagerLayoutObserver || window.VCManagerLayoutTimer)
@@ -1864,6 +1867,61 @@ def vc_manager_farm_script():
             });
         };
 
+        window.sizeVCStatusCards = function() {
+            const findCard = exactTitle => {
+                const title = Array.from(document.querySelectorAll('*')).find(element =>
+                    element.childElementCount === 0 && element.textContent.trim() === exactTitle
+                );
+                return title ? (title.closest('.card') || title.parentElement) : null;
+            };
+            const voiceCard = findCard('Voice Status');
+            const channelCard = findCard('Channel Status');
+            if (!voiceCard || !channelCard || voiceCard.parentElement !== channelCard.parentElement) return;
+            const row = voiceCard.parentElement;
+            if (window.innerWidth < 900) {
+                row.style.display = 'grid';
+                row.style.gridTemplateColumns = 'minmax(0, 1fr)';
+                row.style.gap = window.innerWidth < 640 ? '12px' : '16px';
+                row.style.width = '100%';
+                [voiceCard, channelCard].forEach(card => {
+                    card.style.width = '100%';
+                    card.style.maxWidth = '100%';
+                    card.style.minWidth = '0';
+                    card.style.boxSizing = 'border-box';
+                });
+                voiceCard.querySelectorAll('button').forEach(button => {
+                    const group = button.parentElement;
+                    if (!group) return;
+                    group.style.display = 'flex';
+                    group.style.flexWrap = 'wrap';
+                    group.style.gap = '8px';
+                    button.style.flex = '1 1 150px';
+                    button.style.minWidth = '0';
+                });
+            } else {
+                row.style.display = '';
+                row.style.gridTemplateColumns = '';
+                row.style.gap = '';
+                row.style.width = '';
+                [voiceCard, channelCard].forEach(card => {
+                    card.style.width = '';
+                    card.style.maxWidth = '';
+                    card.style.minWidth = '';
+                    card.style.boxSizing = '';
+                });
+                voiceCard.querySelectorAll('button').forEach(button => {
+                    const group = button.parentElement;
+                    if (group) {
+                        group.style.display = '';
+                        group.style.flexWrap = '';
+                        group.style.gap = '';
+                    }
+                    button.style.flex = '';
+                    button.style.minWidth = '';
+                });
+            }
+        };
+
         if (window.VCManagerTokenFormClickHandler) {
             document.removeEventListener('click', window.VCManagerTokenFormClickHandler, true);
             window.VCManagerTokenFormClickHandler = null;
@@ -1881,6 +1939,11 @@ def vc_manager_farm_script():
                 button.dataset.vcSubmitting = 'true';
                 button.disabled = true;
                 button.textContent = 'Adding...';
+                const errorNode = form.querySelector('[data-vc-token-error]');
+                if (errorNode) {
+                    errorNode.textContent = '';
+                    errorNode.style.display = 'none';
+                }
                 const payload = JSON.stringify({
                     token: String(tokenInput.value || ''),
                     name: nameInput ? String(nameInput.value || '') : '',
@@ -1895,6 +1958,16 @@ def vc_manager_farm_script():
                 proxy.click();
                 proxy.value = '';
                 proxy.removeAttribute('value');
+                if (button.vcSubmitTimeout) clearTimeout(button.vcSubmitTimeout);
+                button.vcSubmitTimeout = setTimeout(() => {
+                    if (button.dataset.vcSubmitting !== 'true') return;
+                    window.VCManagerTokenForm.finish(form.id, false);
+                    const timeoutError = form.querySelector('[data-vc-token-error]');
+                    if (timeoutError) {
+                        timeoutError.textContent = 'Nighty did not receive the request. Reload this tab, then try again.';
+                        timeoutError.style.display = 'block';
+                    }
+                }, 45000);
             },
             finish: function(formId, shouldClear) {
                 const form = document.getElementById(formId);
@@ -1910,6 +1983,8 @@ def vc_manager_farm_script():
                 if (shouldClear && tokenInput) tokenInput.value = '';
                 if (shouldClear && nameInput) nameInput.value = '';
                 if (submitButton) {
+                    if (submitButton.vcSubmitTimeout) clearTimeout(submitButton.vcSubmitTimeout);
+                    submitButton.vcSubmitTimeout = null;
                     delete submitButton.dataset.vcSubmitting;
                     submitButton.disabled = false;
                     submitButton.textContent = 'Add Account';
@@ -2002,6 +2077,7 @@ def vc_manager_farm_script():
             window.sizeVCParticipantCard();
             window.sizeVCManagedAccountsCard();
             window.sizeVCAccountSetupCards();
+            window.sizeVCStatusCards();
             window.wireVCManagerTokenForm();
             document.querySelectorAll('.vc-managed-accounts-pager').forEach(root => {
                 if (root.dataset.managedPagerReady !== 'true') {
@@ -2045,6 +2121,7 @@ def vc_manager_farm_script():
             window.sizeVCParticipantCard();
             window.sizeVCManagedAccountsCard();
             window.sizeVCAccountSetupCards();
+            window.sizeVCStatusCards();
             window.wireVCManagerTokenForm();
             Object.keys(window.VCParticipantPager.states).forEach(pagerId =>
                 window.VCParticipantPager.render(pagerId)
@@ -2294,8 +2371,8 @@ def vc_manager_farm_script():
                 .vc-profile-card{--profile-accent:#5865f2;position:relative;width:min(600px,94vw);max-height:min(860px,92vh);overflow:hidden;border:1px solid rgba(255,255,255,.14);border-radius:18px;background:#111214;color:#f2f3f5;box-shadow:0 28px 80px rgba(0,0,0,.62);font-family:inherit}
                 .vc-profile-scroll{max-height:min(860px,92vh);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
                 .vc-profile-banner{position:relative;height:150px;overflow:hidden;background:linear-gradient(125deg,var(--profile-accent),#232428 78%);background-position:center;background-size:cover}
-                .vc-profile-effect{position:absolute;inset:-40%;pointer-events:none;opacity:.72;background:conic-gradient(from 20deg,transparent 0 25%,rgba(255,255,255,.18),transparent 48% 72%,rgba(88,101,242,.5),transparent);animation:vc-profile-spin 9s linear infinite;mix-blend-mode:screen}
-                @keyframes vc-profile-spin{to{transform:rotate(360deg)}}
+                .vc-profile-effect{position:absolute;inset:0;z-index:2;pointer-events:none;overflow:hidden}
+                .vc-profile-effect img,.vc-profile-effect video{width:100%;height:100%;display:block;object-fit:cover;pointer-events:none}
                 .vc-profile-close{position:absolute;top:14px;right:14px;z-index:8;width:34px;height:34px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.18);border-radius:50%;background:rgba(15,16,18,.72);color:#fff;cursor:pointer;font:600 18px/1 inherit;backdrop-filter:blur(4px)}
                 .vc-profile-head{position:relative;padding:0 22px 18px}.vc-profile-avatar-wrap{position:relative;width:104px;height:104px;margin-top:-52px;z-index:3}
                 .vc-profile-avatar{width:92px;height:92px;margin:6px;border:6px solid #111214;border-radius:50%;box-sizing:border-box;object-fit:cover;background:#232428}
@@ -2306,12 +2383,12 @@ def vc_manager_farm_script():
                 .vc-profile-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.vc-profile-fact{min-width:0;padding:10px;border-radius:9px;background:#2b2d31}.vc-profile-fact-label{display:block;margin-bottom:4px;color:#949ba4;font-size:11px;font-weight:700;text-transform:uppercase}.vc-profile-fact-value{display:block;color:#f2f3f5;font-size:13px;line-height:1.35;overflow-wrap:anywhere}
                 .vc-profile-chips{display:flex;flex-wrap:wrap;gap:6px}.vc-profile-chip{max-width:100%;padding:5px 8px;border-radius:6px;background:#2b2d31;color:#dbdee1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.vc-profile-history{display:flex;flex-direction:column;gap:7px;max-height:270px;overflow-y:auto;padding-right:2px}.vc-profile-session{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:10px;border-radius:9px;background:#2b2d31}.vc-profile-session-main{min-width:0}.vc-profile-session-channel{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.vc-profile-session-meta{margin-top:4px;color:#b5bac1;font-size:11px;line-height:1.4}.vc-profile-session-duration{align-self:start;padding:3px 7px;border-radius:6px;background:#111214;font:700 11px/1.4 monospace;white-space:nowrap}.vc-profile-note{color:#b5bac1;font-size:12px;line-height:1.45}
                 @media(max-width:560px){.vc-profile-card{width:calc(100vw - 20px);max-height:90vh}.vc-profile-scroll{max-height:90vh}.vc-profile-banner{height:126px}.vc-profile-head,.vc-profile-body{padding-left:16px;padding-right:16px}.vc-profile-facts{grid-template-columns:minmax(0,1fr)}}
-                @media(prefers-reduced-motion:reduce){.vc-profile-effect{animation:none}}
+                @media(prefers-reduced-motion:reduce){.vc-profile-effect video{display:none}}
             </style>
             <div class="vc-profile-card" data-vc-participant-profile role="dialog" aria-modal="true" aria-label="Participant profile">
                 <button class="vc-profile-close" type="button" aria-label="Close profile" onclick="${onClose}">&times;</button>
                 <div class="vc-profile-scroll">
-                    <div class="vc-profile-banner" data-profile-banner><div class="vc-profile-effect" data-profile-effect hidden></div></div>
+                    <div class="vc-profile-banner" data-profile-banner><div class="vc-profile-effect" data-profile-effect hidden><img data-profile-effect-image alt="Profile effect" hidden><video data-profile-effect-video autoplay muted loop playsinline hidden></video></div></div>
                     <div class="vc-profile-head">
                         <div class="vc-profile-avatar-wrap"><img class="vc-profile-avatar" data-profile-avatar alt="User avatar"><img class="vc-profile-decoration" data-profile-decoration alt="" hidden><span class="vc-profile-status"></span></div>
                         <div class="vc-profile-identity"><div class="vc-profile-name-line"><h2 class="vc-profile-display-name" data-profile-display-name>User</h2><span class="vc-profile-tag" data-profile-tag><img data-profile-tag-badge alt=""><span data-profile-tag-text></span></span></div><div class="vc-profile-username" data-profile-username></div><div class="vc-profile-pronouns" data-profile-pronouns hidden></div><div class="vc-profile-badges" data-profile-badges hidden></div></div>
@@ -2358,7 +2435,7 @@ def vc_manager_farm_script():
                 };
                 const card=q('.vc-profile-card');if(card&&profile.accent_color)card.style.setProperty('--profile-accent',String(profile.accent_color));
                 const banner=q('[data-profile-banner]'),bannerUrl=safeUrl(profile.banner_url);if(banner&&bannerUrl)banner.style.backgroundImage='linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.14)),url('+JSON.stringify(bannerUrl)+')';
-                const effect=q('[data-profile-effect]');if(effect&&profile.profile_effect_id)effect.hidden=false;
+                const effect=q('[data-profile-effect]'),effectUrl=safeUrl(profile.profile_effect_url);if(effect&&effectUrl){const video=q('[data-profile-effect-video]'),image=q('[data-profile-effect-image]');if(video&&/\.(?:mp4|webm)(?:$|[?#])/i.test(effectUrl)){video.src=effectUrl;video.hidden=false;video.play().catch(()=>{video.hidden=true;if(image){image.src=effectUrl;image.hidden=false}})}else if(image){image.src=effectUrl;image.hidden=false}effect.hidden=false}
                 const avatar=q('[data-profile-avatar]'),avatarUrl=safeUrl(profile.avatar_url);if(avatar){if(avatarUrl)avatar.src=avatarUrl;avatar.alt=`${profile.display_name||'User'} avatar`}
                 const decoration=q('[data-profile-decoration]'),decorationUrl=safeUrl(profile.decoration_url);if(decoration&&decorationUrl){decoration.src=decorationUrl;decoration.hidden=false}
                 const status=q('.vc-profile-status');if(status&&profile.status_color)status.style.background=String(profile.status_color);
@@ -2870,6 +2947,8 @@ def vc_manager_farm_script():
             self._retry_delay = None
             self._resume_on_hello = False
             self._gateway_generation = 0
+            self._authenticated_generation = 0
+            self._gateway_ready = asyncio.Event()
             self._heartbeat_acknowledged = True
             self._restore_task = None
             self._stream_start_task = None
@@ -3484,6 +3563,8 @@ def vc_manager_farm_script():
 
                 self._gateway_generation += 1
                 gateway_generation = self._gateway_generation
+                self._authenticated_generation = 0
+                self._gateway_ready.clear()
                 gateway_ws = self.ws
                 self.listener_task = safe_create_task(
                     self._gateway_loop(gateway_ws, gateway_generation)
@@ -3533,6 +3614,18 @@ def vc_manager_farm_script():
             except Exception as error:
                 if not self._closing:
                     print(f"[VC Manager] Heartbeat stopped for {self.name}: {error}", type_="ERROR")
+                    if (
+                        self.ws is gateway_ws
+                        and self._gateway_generation == gateway_generation
+                        and not gateway_ws.closed
+                    ):
+                        try:
+                            await gateway_ws.close(code=4000, message=b"Heartbeat send failed")
+                        except Exception as close_error:
+                            print(
+                                f"[VC Manager] Could not restart {self.name} after a heartbeat failure: {close_error}",
+                                type_="ERROR",
+                            )
 
         async def _gateway_loop(self, gateway_ws, gateway_generation):
             should_reconnect = True
@@ -3583,6 +3676,8 @@ def vc_manager_farm_script():
                             except (NameError, RuntimeError):
                                 pass
                             self._reconnect_attempts = 0
+                            self._authenticated_generation = gateway_generation
+                            self._gateway_ready.set()
                             self._set_status("Ready")
                             if self.desired_channel_id:
                                 self._schedule_voice_restore()
@@ -3590,6 +3685,8 @@ def vc_manager_farm_script():
                                     self._schedule_stream_start()
                         elif t == "RESUMED":
                             self._reconnect_attempts = 0
+                            self._authenticated_generation = gateway_generation
+                            self._gateway_ready.set()
                             self._set_status("Connected" if self.desired_channel_id else "Ready")
                             if self.desired_channel_id:
                                 self._schedule_voice_restore()
@@ -3706,6 +3803,7 @@ def vc_manager_farm_script():
                     self.ws is gateway_ws and self._gateway_generation == gateway_generation
                 )
                 if is_current_generation:
+                    self._gateway_ready.clear()
                     self.ws = None
                     self.is_in_vc = False
                     self.current_channel_id = None
@@ -3729,12 +3827,33 @@ def vc_manager_farm_script():
         async def join_vc(self, guild_id, channel_id, mute=False, deaf=False, stream=False, video=False):
             if not await self.start_gateway():
                 return False
-            for _ in range(300):
-                if self.user_id and self.ws and not self.ws.closed:
-                    break
-                if self.status == "Token rejected" or (self.ws and self.ws.closed):
-                    break
-                await asyncio.sleep(0.1)
+            expected_generation = self._gateway_generation
+            expected_ws = self.ws
+            try:
+                await asyncio.wait_for(self._gateway_ready.wait(), timeout=20)
+            except asyncio.TimeoutError:
+                if self._gateway_generation != expected_generation or self.ws is not expected_ws:
+                    self._set_status(
+                        "Gateway reconnecting",
+                        "Discord replaced the connection while this account was signing in. Try Join again shortly.",
+                    )
+                    return False
+                self._set_status(
+                    "Gateway login timed out",
+                    "Discord opened the connection but did not finish signing in. VC Manager will reconnect and try again.",
+                )
+                if expected_ws and not expected_ws.closed:
+                    await expected_ws.close(code=4000, message=b"Gateway login timeout")
+                self._schedule_reconnect(5)
+                return False
+            if (
+                self._authenticated_generation != expected_generation
+                or self._gateway_generation != expected_generation
+                or not self.ws
+                or self.ws.closed
+            ):
+                self._set_status("Gateway reconnecting", "Wait for this account to finish reconnecting, then try Join again.")
+                return False
 
             if not self.ws or self.ws.closed or not self.user_id:
                 if not self.last_error:
@@ -3965,23 +4084,40 @@ def vc_manager_farm_script():
                 return False
 
             self._set_status("Connected")
-            update_saved_token(
+            saved = update_saved_token(
                 self.record_id,
                 muted=self.is_muted,
                 deafened=self.is_deafened,
                 streaming=self.desired_streaming,
                 camera_on=self.is_camera_on,
             )
+            if not saved:
+                self._set_status(
+                    "Connected",
+                    "Discord applied the control, but Nighty could not save it for the next restart. Check the scripts JSON folder permissions.",
+                )
             return True
 
         async def leave_vc(self):
             was_pending = bool(self.desired_channel_id)
             leave_guild_id = self.current_guild_id or self.desired_guild_id
             self.clear_desired_voice()
-            update_saved_token(self.record_id, stay_connected=False)
+            saved = False
+            for attempt in range(3):
+                saved = update_saved_token(self.record_id, stay_connected=False)
+                if saved:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(0.25)
+            save_warning = ""
+            if not saved:
+                save_warning = (
+                    "Discord received the leave request, but Nighty could not save it. "
+                    "Fix the scripts JSON folder permissions before restarting Nighty, or this account may rejoin its old channel."
+                )
             if not leave_guild_id or not self.ws or self.ws.closed:
-                if self.user_id:
-                    self._set_status("Ready")
+                if self.user_id or save_warning:
+                    self._set_status("Ready" if self.user_id else "Disconnected", save_warning)
                 return was_pending
             try:
                 await self.ws.send_json({
@@ -4002,7 +4138,7 @@ def vc_manager_farm_script():
             self.is_in_vc = False
             self.current_channel_id = None
             self.current_guild_id = None
-            self._set_status("Ready")
+            self._set_status("Ready", save_warning)
             return True
 
         async def close(self, preserve_voice=False):
@@ -4596,6 +4732,7 @@ def vc_manager_farm_script():
 
     async def update_voice_state(mute=None, deaf=None, stream=None, video=None):
         nonlocal is_muted, is_deafened, is_streaming, is_camera_on
+        runtime_state.pop("primary_control_save_error", None)
         cur = get_current_voice_channel()
         if not cur:
             return False
@@ -4633,7 +4770,11 @@ def vc_manager_farm_script():
         data["settings"]["deafened"] = is_deafened
         data["settings"]["streaming"] = is_streaming
         data["settings"]["camera_on"] = is_camera_on
-        save_data(data)
+        if not save_data(data):
+            runtime_state["primary_control_save_error"] = (
+                "Discord applied the control, but Nighty could not save it for the next restart. "
+                "Check the scripts JSON folder permissions."
+            )
 
         await sync_managed_voice_controls(
             mute=mute,
@@ -4991,7 +5132,7 @@ def vc_manager_farm_script():
             "use_theme": bool(settings.get("use_theme", True)),
             "detailed_status": bool(settings.get("detailed_status", True))
         }
-        save_data(data)
+        return save_data(data)
 
     def sync_command_settings_ui(settings=None):
         settings = settings or get_slash_response_settings()
@@ -5081,23 +5222,49 @@ def vc_manager_farm_script():
             container["accent_color"] = accent_color
         return [container]
 
-    def themed_layout_container(content, footer=None):
+    def themed_layout_container(content, footer=None, title=None):
         """Render the active Themes V2 layout in a native interactive view."""
+        body_marker = "\ue000VC_MANAGER_BODY\ue000"
         if not get_slash_response_settings()["use_theme"]:
             container = discord_api.ui.Container()
-            container.add_item(discord_api.ui.TextDisplay(content))
+            if title:
+                container.add_item(discord_api.ui.TextDisplay(f"# {title}"))
+                container.add_item(discord_api.ui.Separator())
+            container.add_item(discord_api.ui.TextDisplay(content or " "))
             if footer:
                 container.add_item(discord_api.ui.Separator())
                 container.add_item(discord_api.ui.TextDisplay(footer))
             return container
 
-        theme = slash_theme_layout(content, footer=footer)[0]
+        theme = slash_theme_layout(body_marker if title else content, footer=footer)[0]
         accent = theme.get("accent_color")
         container = discord_api.ui.Container(accent_color=accent) if accent is not None else discord_api.ui.Container()
+        def add_text(text, thumbnail_url=None):
+            text = str(text or " ")
+            if title and body_marker in text:
+                heading = text.replace(body_marker, f"# {title}")
+                if thumbnail_url:
+                    container.add_item(discord_api.ui.Section(
+                        discord_api.ui.TextDisplay(heading),
+                        accessory=discord_api.ui.Thumbnail(thumbnail_url),
+                    ))
+                else:
+                    container.add_item(discord_api.ui.TextDisplay(heading))
+                container.add_item(discord_api.ui.Separator())
+                container.add_item(discord_api.ui.TextDisplay(content or " "))
+                return
+            if thumbnail_url:
+                container.add_item(discord_api.ui.Section(
+                    discord_api.ui.TextDisplay(text),
+                    accessory=discord_api.ui.Thumbnail(thumbnail_url),
+                ))
+            else:
+                container.add_item(discord_api.ui.TextDisplay(text))
+
         for item in theme.get("components", [])[:35]:
             kind = item.get("type")
             if kind == 10:
-                container.add_item(discord_api.ui.TextDisplay(item.get("content") or " "))
+                add_text(item.get("content") or " ")
             elif kind == 14:
                 spacing_type = getattr(discord_api, "SeparatorSpacing", None)
                 if spacing_type:
@@ -5108,13 +5275,7 @@ def vc_manager_farm_script():
             elif kind == 9:
                 section_text = (item.get("components") or [{}])[0].get("content") or " "
                 image_url = ((item.get("accessory") or {}).get("media") or {}).get("url")
-                if image_url:
-                    container.add_item(discord_api.ui.Section(
-                        discord_api.ui.TextDisplay(section_text),
-                        accessory=discord_api.ui.Thumbnail(image_url),
-                    ))
-                else:
-                    container.add_item(discord_api.ui.TextDisplay(section_text))
+                add_text(section_text, image_url)
             elif kind == 12:
                 gallery = discord_api.ui.MediaGallery()
                 for media in item.get("items", [])[:10]:
@@ -5124,6 +5285,22 @@ def vc_manager_farm_script():
                 if gallery.items:
                     container.add_item(gallery)
         return container
+
+    def no_mentions():
+        allowed_mentions = getattr(discord_api, "AllowedMentions", None) if discord_api else None
+        return allowed_mentions.none() if allowed_mentions and hasattr(allowed_mentions, "none") else None
+
+    def effective_private(requested):
+        try:
+            config = getConfigData() or {}
+        except Exception:
+            config = {}
+        return bool(
+            requested
+            or config.get("private")
+            or config.get("force_private")
+            or config.get("forcePrivate")
+        )
 
     class VCSlashContext:
         """Slash API context with native Components V2 response support."""
@@ -5139,37 +5316,49 @@ def vc_manager_farm_script():
         async def send_v2(self, title, description, ephemeral=None, footer=None):
             if ephemeral is None:
                 ephemeral = get_slash_response_settings()["ephemeral"]
-            if footer is not None:
-                description = f"{description}\n\n{footer}"
-            if not callable(slash_reply_api) or not get_slash_response_settings()["use_theme"]:
-                content = f"## {title}\n{description}" if title else description
-                if discord_api and getattr(getattr(discord_api, "ui", None), "LayoutView", None):
-                    view = discord_api.ui.LayoutView()
-                    view.add_item(themed_layout_container(content))
-                    return await self.send_layout(view, private=ephemeral)
-                if not self.interaction.response.is_done():
-                    return await self.interaction.response.send_message(content=content, ephemeral=ephemeral)
-                return await self.interaction.followup.send(content=content, ephemeral=ephemeral)
+            if discord_api and getattr(getattr(discord_api, "ui", None), "LayoutView", None):
+                view = discord_api.ui.LayoutView()
+                view.add_item(themed_layout_container(description, footer=footer, title=title))
+                return await self.send_layout(view, private=ephemeral)
+            if callable(slash_reply_api):
+                result = await slash_reply_api(self.interaction, description, title=title)
+                self._done = True
+                return result
+            content = f"# {title}\n\n{description}" if title else description
+            private = effective_private(ephemeral)
+            kwargs = {"content": content, "ephemeral": private}
+            mentions = no_mentions()
+            if mentions is not None:
+                kwargs["allowed_mentions"] = mentions
             if not self.interaction.response.is_done():
-                await self.interaction.response.defer(thinking=True, ephemeral=ephemeral)
-            result = await slash_reply_api(self.interaction, description, title=title)
-            self._done = True
-            return result
+                return await self.interaction.response.send_message(**kwargs)
+            return await self.interaction.followup.send(**kwargs)
 
         async def send_layout(self, view, private=None):
             if private is None:
                 private = get_slash_response_settings()["ephemeral"]
+            private = effective_private(private)
             response = self.interaction.response
+            mentions = no_mentions()
             if not response.is_done():
-                result = await response.send_message(view=view, ephemeral=private)
+                kwargs = {"view": view, "ephemeral": private}
+                if mentions is not None:
+                    kwargs["allowed_mentions"] = mentions
+                result = await response.send_message(**kwargs)
             elif (
                 response.type == discord_api.InteractionResponseType.deferred_channel_message
                 and not self.interaction.extras.get("v2_placeholder_used")
             ):
                 self.interaction.extras["v2_placeholder_used"] = True
-                result = await self.interaction.edit_original_response(view=view)
+                kwargs = {"view": view}
+                if mentions is not None:
+                    kwargs["allowed_mentions"] = mentions
+                result = await self.interaction.edit_original_response(**kwargs)
             else:
-                result = await self.interaction.followup.send(view=view, ephemeral=private)
+                kwargs = {"view": view, "ephemeral": private}
+                if mentions is not None:
+                    kwargs["allowed_mentions"] = mentions
+                result = await self.interaction.followup.send(**kwargs)
             self._done = True
             return result
 
@@ -5301,7 +5490,10 @@ def vc_manager_farm_script():
             if not target or not getattr(target, "guild", None):
                 return await ctx.error(f"Could not find voice channel `{channel}`.")
             if not ctx.interaction.response.is_done():
-                await ctx.interaction.response.defer(thinking=True, ephemeral=ctx._ephemeral)
+                await ctx.interaction.response.defer(
+                    thinking=True,
+                    ephemeral=effective_private(ctx._ephemeral),
+                )
             if await connect(target.guild.id, target.id):
                 await ctx.send_v2("Connected", f"VC Manager joined {format_channel_name(target.name)} in **{target.guild.name}**.")
             else:
@@ -5323,7 +5515,10 @@ def vc_manager_farm_script():
                 return await ctx.error(f"Could not find voice channel `{channel_id}`.")
 
             if not ctx.interaction.response.is_done():
-                await ctx.interaction.response.defer(thinking=True, ephemeral=ctx._ephemeral)
+                await ctx.interaction.response.defer(
+                    thinking=True,
+                    ephemeral=effective_private(ctx._ephemeral),
+                )
             old_state = (is_muted, is_deafened, is_streaming, is_camera_on)
             is_muted = is_deafened = is_streaming = is_camera_on = True
             intentional_disconnect = False
@@ -5387,7 +5582,10 @@ def vc_manager_farm_script():
             if not is_actually_connected():
                 return await ctx.error("VC Manager is not connected.")
             if not ctx.interaction.response.is_done():
-                await ctx.interaction.response.defer(thinking=True, ephemeral=ctx._ephemeral)
+                await ctx.interaction.response.defer(
+                    thinking=True,
+                    ephemeral=effective_private(ctx._ephemeral),
+                )
             if await disconnect_from_voice(intentional=True):
                 await ctx.send_v2("Disconnected", "VC Manager left the voice channel.")
             else:
@@ -5407,14 +5605,22 @@ def vc_manager_farm_script():
             if current_enabled == enabled:
                 current_state = "enabled" if enabled else "disabled"
                 return await ctx.send_v2(
-                    f"{label} Unchanged",
-                    f"{label} is already **{current_state}**."
+                    label,
+                    f"Already **{current_state}**.\n\n{label} was not changed."
                 )
             if not ctx.interaction.response.is_done():
-                await ctx.interaction.response.defer(thinking=True, ephemeral=ctx._ephemeral)
+                await ctx.interaction.response.defer(
+                    thinking=True,
+                    ephemeral=effective_private(ctx._ephemeral),
+                )
             kwargs = {setting: enabled}
             if await update_voice_state(**kwargs):
-                await ctx.send_v2("Voice Control Updated", f"**{label}:** {'Enabled' if enabled else 'Disabled'}")
+                state_text = "Enabled" if enabled else "Disabled"
+                save_warning = runtime_state.pop("primary_control_save_error", "")
+                description = f"**{state_text}**\n\n{label} is now {state_text.lower()}."
+                if save_warning:
+                    description += f"\n\n{save_warning}"
+                await ctx.send_v2(label, description)
             else:
                 await ctx.error("Discord rejected the voice-state update.")
 
@@ -5507,8 +5713,9 @@ def vc_manager_farm_script():
                 previous.callback = self.on_previous
                 following.callback = self.on_next
                 container = themed_layout_container(
-                    f"## Voice Session History\n{content}",
+                    content,
                     footer=f"**Sessions:** {session_count}",
+                    title="Voice Session History",
                 )
                 container.add_item(discord_api.ui.ActionRow(previous, position, following))
                 self.add_item(container)
@@ -5521,7 +5728,11 @@ def vc_manager_farm_script():
                     return
                 self.page += delta
                 self.render()
-                await interaction.response.edit_message(view=self)
+                kwargs = {"view": self}
+                mentions = no_mentions()
+                if mentions is not None:
+                    kwargs["allowed_mentions"] = mentions
+                await interaction.response.edit_message(**kwargs)
 
             async def on_previous(self, interaction):
                 await self.change_page(interaction, -1)
@@ -5540,7 +5751,7 @@ def vc_manager_farm_script():
             if not ctx.interaction.response.is_done():
                 await ctx.interaction.response.defer(
                     thinking=True,
-                    ephemeral=get_slash_response_settings()["ephemeral"],
+                    ephemeral=effective_private(get_slash_response_settings()["ephemeral"]),
                 )
             await ctx.send_layout(HistoryView(ctx.user.id, page))
 
@@ -5632,6 +5843,91 @@ def vc_manager_farm_script():
                 f"**Managed accounts connected:** {connected_accounts} / {len(token_clients)}"
             )
 
+        class SettingsView(discord_api.ui.LayoutView):
+            SETTING_ROWS = (
+                ("ephemeral", "Ephemeral responses", "Only you can see command replies"),
+                ("use_theme", "Nighty V2 theme", "Use the active Components V2 theme"),
+                ("detailed_status", "Detailed status", "Show server, channel ID, and session details"),
+            )
+
+            def __init__(self, owner_id, notice=""):
+                super().__init__(timeout=300)
+                self.owner_id = str(owner_id)
+                self.notice = notice
+                self.render()
+
+            @staticmethod
+            def setting_label(value):
+                return "Enabled" if value else "Disabled"
+
+            def render(self):
+                self.clear_items()
+                settings = get_slash_response_settings()
+                lines = [
+                    f"**{label}:** {self.setting_label(settings[key])}"
+                    for key, label, _ in self.SETTING_ROWS
+                ]
+                if self.notice:
+                    lines.extend(("", self.notice))
+                lines.extend(("", "Choose Enabled or Disabled from each menu. Privacy changes apply to the next response."))
+                container = themed_layout_container(
+                    "\n".join(lines),
+                    title="VC Manager Settings",
+                )
+
+                for setting_key, label, description in self.SETTING_ROWS:
+                    current = bool(settings[setting_key])
+                    select = discord_api.ui.Select(
+                        placeholder=label,
+                        min_values=1,
+                        max_values=1,
+                        options=[
+                            discord_api.SelectOption(
+                                label="Enabled",
+                                value="enabled",
+                                description=description,
+                                default=current,
+                            ),
+                            discord_api.SelectOption(
+                                label="Disabled",
+                                value="disabled",
+                                description=f"Turn off {label.lower()}",
+                                default=not current,
+                            ),
+                        ],
+                    )
+
+                    async def update_setting(interaction, key=setting_key, setting_label=label, control=select):
+                        if str(getattr(getattr(interaction, "user", None), "id", "")) != self.owner_id:
+                            await interaction.response.send_message(
+                                "Only the Nighty account owner can change these settings.",
+                                ephemeral=True,
+                            )
+                            return
+                        await interaction.response.defer()
+                        latest = get_slash_response_settings()
+                        previous = bool(latest[key])
+                        enabled = bool(control.values and control.values[0] == "enabled")
+                        if previous == enabled:
+                            self.notice = f"{setting_label} is already **{self.setting_label(enabled).lower()}**."
+                        else:
+                            latest[key] = enabled
+                            if save_slash_response_settings(latest):
+                                sync_command_settings_ui(latest)
+                                self.notice = f"Saved **{setting_label}** as **{self.setting_label(enabled).lower()}**."
+                            else:
+                                self.notice = f"Could not save **{setting_label}**. Check Nighty's file access and try again."
+                        self.render()
+                        kwargs = {"view": self}
+                        mentions = no_mentions()
+                        if mentions is not None:
+                            kwargs["allowed_mentions"] = mentions
+                        await interaction.edit_original_response(**kwargs)
+
+                    select.callback = update_setting
+                    container.add_item(discord_api.ui.ActionRow(select))
+                self.add_item(container)
+
         @vc_group.command(
             name="settings",
             description="View or update slash response settings",
@@ -5661,21 +5957,13 @@ def vc_manager_farm_script():
                 settings["detailed_status"] = detailed
                 changed.append("Detailed status")
             if changed:
-                save_slash_response_settings(settings)
+                if not save_slash_response_settings(settings):
+                    return await ctx.error(
+                        "Nighty could not save the command settings. Check its file access and try again."
+                    )
             sync_command_settings_ui(settings)
-
-            def setting_label(value):
-                return "Enabled" if value else "Disabled"
-
-            heading = "Saved your settings.\n\n" if changed else ""
-            await ctx.send_v2(
-                "VC Manager Settings",
-                heading
-                + f"**Ephemeral responses:** {setting_label(settings['ephemeral'])}\n"
-                + f"**Nighty V2 theme:** {setting_label(settings['use_theme'])}\n"
-                + f"**Detailed status:** {setting_label(settings['detailed_status'])}\n\n"
-                + f"Use `/{vc_group.name} settings` options to change these values."
-            )
+            notice = "Saved the command options." if changed else ""
+            await ctx.send_layout(SettingsView(ctx.user.id, notice=notice))
 
         @vc_group.command(name="help", description="Show all VC Manager slash commands")
         async def slash_vc_help(ctx):
@@ -6085,6 +6373,76 @@ def vc_manager_farm_script():
                 return value
         return None
 
+    async def resolve_profile_effect_asset(effect_id):
+        """Resolve Discord's current profile-effect asset without hardcoding effect IDs."""
+        effect_id = str(effect_id or "").strip()
+        if not effect_id:
+            return ""
+        cache = runtime_state.setdefault("profile_effect_assets", {})
+        if effect_id in cache:
+            return cache[effect_id]
+
+        route_type = getattr(getattr(discord_api, "http", None), "Route", None)
+        http_client = getattr(bot, "http", None)
+        if route_type is None or http_client is None:
+            cache[effect_id] = ""
+            return ""
+
+        def matching_entry(node):
+            if isinstance(node, dict):
+                identifiers = {
+                    str(node.get(key) or "")
+                    for key in ("id", "effect_id", "sku_id", "skuId")
+                }
+                if effect_id in identifiers:
+                    return node
+                for value in node.values():
+                    found = matching_entry(value)
+                    if found is not None:
+                        return found
+            elif isinstance(node, list):
+                for value in node:
+                    found = matching_entry(value)
+                    if found is not None:
+                        return found
+            return None
+
+        def asset_urls(node, key_hint=""):
+            found = []
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    found.extend(asset_urls(value, str(key)))
+            elif isinstance(node, list):
+                for value in node:
+                    found.extend(asset_urls(value, key_hint))
+            elif isinstance(node, str) and node.startswith("https://"):
+                host = urlparse(node).hostname or ""
+                if host == "discord.com" or host.endswith(".discord.com") or host.endswith(".discordapp.com"):
+                    priority = {
+                        "src": 0,
+                        "reducedmotionsrc": 1,
+                        "reduced_motion_src": 1,
+                        "thumbnailpreviewsrc": 2,
+                        "thumbnail_preview_src": 2,
+                        "thumbnail": 3,
+                    }.get(key_hint.replace("-", "").lower(), 9)
+                    found.append((priority, node))
+            return found
+
+        try:
+            payload = await http_client.request(route_type("GET", "/user-profile-effects"))
+            entry = matching_entry(payload)
+            urls = sorted(asset_urls(entry)) if entry is not None else []
+            asset = urls[0][1] if urls else ""
+        except Exception as error:
+            print(
+                f"[VC Manager] Could not load Discord profile effect {effect_id}: {type(error).__name__}: {error}",
+                type_="ERROR",
+            )
+            asset = ""
+        cache[effect_id] = asset
+        return asset
+
     async def open_participant_profile(user_id):
         cur = get_current_voice_channel()
         if not cur:
@@ -6158,6 +6516,7 @@ def vc_manager_farm_script():
         effect_id = metadata_value(guild_metadata, global_metadata, attribute="effect_id")
         if not effect_id and full_profile:
             effect_id = getattr(full_profile, "effect_id", None) or getattr(full_profile, "profile_effect_id", None)
+        effect_url = await resolve_profile_effect_asset(effect_id)
         accent = metadata_value(guild_metadata, global_metadata, attribute="accent_color")
         if accent is None:
             theme_colors = metadata_value(guild_metadata, global_metadata, attribute="theme_colors")
@@ -6227,6 +6586,7 @@ def vc_manager_farm_script():
             "banner_url": profile_asset_url(banner, 1024),
             "accent_color": profile_color(accent),
             "profile_effect_id": str(effect_id or ""),
+            "profile_effect_url": effect_url,
             "bio": str(bio or ""),
             "pronouns": str(pronouns or ""),
             "server_tag": server_tag,
@@ -6501,7 +6861,8 @@ def vc_manager_farm_script():
                 "pending": bool(client and client.desired_channel_id and not in_vc),
                 "muted": bool(client.is_muted) if client else False,
                 "deafened": bool(client.is_deafened) if client else False,
-                "streaming": bool(client.is_streaming) if client else False,
+                "streaming": bool(client.desired_streaming) if client else False,
+                "streaming_live": bool(client.is_streaming) if client else False,
                 "camera_on": bool(client.is_camera_on) if client else False,
                 "removable": True
             })
@@ -6997,25 +7358,29 @@ def vc_manager_farm_script():
 
     async def handle_mute_toggle(checked):
         if await update_voice_state(mute=checked):
-            tab.toast("Microphone", "Muted" if is_muted else "Unmuted", "SUCCESS")
+            warning = runtime_state.pop("primary_control_save_error", "")
+            tab.toast("Microphone", warning or ("Muted" if is_muted else "Unmuted"), "ERROR" if warning else "SUCCESS")
         else:
             tab.toast("Error", "Connect to a voice channel first", "ERROR")
 
     async def handle_deafen_toggle(checked):
         if await update_voice_state(deaf=checked):
-            tab.toast("Audio", "Deafened" if is_deafened else "Undeafened", "SUCCESS")
+            warning = runtime_state.pop("primary_control_save_error", "")
+            tab.toast("Audio", warning or ("Deafened" if is_deafened else "Undeafened"), "ERROR" if warning else "SUCCESS")
         else:
             tab.toast("Error", "Connect to a voice channel first", "ERROR")
 
     async def handle_stream_toggle(checked):
         if await update_voice_state(stream=checked):
-            tab.toast("Screen share", "Enabled" if is_streaming else "Disabled", "SUCCESS")
+            warning = runtime_state.pop("primary_control_save_error", "")
+            tab.toast("Screen share", warning or ("Enabled" if is_streaming else "Disabled"), "ERROR" if warning else "SUCCESS")
         else:
             tab.toast("Error", "Connect to a voice channel first", "ERROR")
 
     async def handle_camera_toggle(checked):
         if await update_voice_state(video=checked):
-            tab.toast("Camera", "Enabled" if is_camera_on else "Disabled", "SUCCESS")
+            warning = runtime_state.pop("primary_control_save_error", "")
+            tab.toast("Camera", warning or ("Enabled" if is_camera_on else "Disabled"), "ERROR" if warning else "SUCCESS")
         else:
             tab.toast("Error", "Connect to a voice channel first", "ERROR")
 
@@ -7039,10 +7404,15 @@ def vc_manager_farm_script():
 
     async def handle_leave_alone_toggle(checked):
         nonlocal is_leave_when_alone
+        previous_value = is_leave_when_alone
         is_leave_when_alone = as_bool(checked)
         data = load_data()
         data["settings"]["leave_when_alone"] = is_leave_when_alone
-        save_data(data)
+        if not save_data(data):
+            is_leave_when_alone = previous_value
+            leave_alone_toggle.checked = previous_value
+            tab.toast("Setting not saved", "Nighty could not save Leave when alone. Check its file access.", "ERROR")
+            return
         tab.toast("Leave when alone", "Enabled" if is_leave_when_alone else "Disabled", "SUCCESS")
 
     async def handle_follow_toggle(checked):
@@ -7057,15 +7427,25 @@ def vc_manager_farm_script():
         is_auto_follow = enabled
         follow_target_id = target
         data = load_data()
+        previous_enabled = bool(data["settings"].get("auto_follow", False))
+        previous_target = str(data["settings"].get("follow_target_id", "") or "")
         data["settings"]["auto_follow"] = is_auto_follow
         data["settings"]["follow_target_id"] = follow_target_id
-        save_data(data)
+        if not save_data(data):
+            is_auto_follow = previous_enabled
+            follow_target_id = previous_target
+            follow_toggle.checked = previous_enabled
+            follow_target_input.value = previous_target
+            tab.toast("Setting not saved", "Nighty could not save Auto-follow. Check its file access.", "ERROR")
+            return
         tab.toast("Auto-follow", "Enabled" if is_auto_follow else "Disabled", "SUCCESS")
 
     async def handle_follow_target_input(value):
         nonlocal follow_target_id, is_auto_follow
-        follow_target_id = str(value or "").strip()
         data = load_data()
+        previous_target = str(data["settings"].get("follow_target_id", "") or "")
+        previous_enabled = bool(data["settings"].get("auto_follow", False))
+        follow_target_id = str(value or "").strip()
         if is_auto_follow and not follow_target_id.isdigit():
             is_auto_follow = False
             ui_refs["follow_toggle"].checked = False
@@ -7073,7 +7453,12 @@ def vc_manager_farm_script():
             tab.toast("Auto-follow disabled", "Enter a numeric Discord user ID.", "INFO")
         if data["settings"].get("follow_target_id") != follow_target_id:
             data["settings"]["follow_target_id"] = follow_target_id
-        save_data(data)
+        if not save_data(data):
+            follow_target_id = previous_target
+            is_auto_follow = previous_enabled
+            follow_target_input.value = previous_target
+            follow_toggle.checked = previous_enabled
+            tab.toast("Target not saved", "Nighty could not save the follow target. Check its file access.", "ERROR")
 
     async def handle_apply_timer():
         apply_timer_btn.loading = True
@@ -7081,7 +7466,9 @@ def vc_manager_farm_script():
             val = pending_timer_minutes
             data = load_data()
             data["settings"]["auto_disconnect_minutes"] = val if val > 0 else None
-            save_data(data)
+            if not save_data(data):
+                tab.toast("Timer not saved", "Nighty could not save the disconnect timer. Check its file access.", "ERROR")
+                return
             await schedule_disconnect(val)
             tab.toast("Disconnect timer", f"Set to {val} min" if val > 0 else "Disabled", "SUCCESS")
         except Exception as e:
@@ -7091,8 +7478,17 @@ def vc_manager_farm_script():
 
     async def update_command_setting(setting_key, checked, label):
         command_settings = get_slash_response_settings()
+        previous_value = bool(command_settings[setting_key])
         command_settings[setting_key] = as_bool(checked)
-        save_slash_response_settings(command_settings)
+        if not save_slash_response_settings(command_settings):
+            command_settings[setting_key] = previous_value
+            sync_command_settings_ui(command_settings)
+            tab.toast(
+                "Command setting not saved",
+                "Nighty could not save this setting. Check its file access, then try again.",
+                "ERROR",
+            )
+            return
         sync_command_settings_ui(command_settings)
         state = "enabled" if command_settings[setting_key] else "disabled"
         tab.toast("Command Settings", f"{label} {state}", "SUCCESS")
@@ -7135,8 +7531,10 @@ def vc_manager_farm_script():
         def clear_sessions():
             current_data = load_data()
             current_data["sessions"] = []
-            save_data(current_data)
-            tab.toast("History cleared", "VC Manager removed the saved sessions.", "SUCCESS")
+            if save_data(current_data):
+                tab.toast("History cleared", "VC Manager removed the saved sessions.", "SUCCESS")
+            else:
+                tab.toast("History not cleared", "Nighty could not save the empty session list.", "ERROR")
 
         tab.sessionhistorymodal(
             title="Voice Session History",
@@ -7410,10 +7808,17 @@ def vc_manager_farm_script():
                 return_exceptions=True
             )
             count = sum(result is True for result in results)
+            save_warnings = [client.last_error for client in connected_clients if client.last_error]
 
             update_token_table_rows()
-            if count == len(connected_clients):
+            if count == len(connected_clients) and not save_warnings:
                 tab.toast("Accounts disconnected", f"Disconnected {count} managed account{'s' if count != 1 else ''}.", "SUCCESS")
+            elif count == len(connected_clients):
+                tab.toast(
+                    "Accounts left, but settings were not saved",
+                    "Nighty could not save one or more Leave actions. Fix the scripts JSON folder permissions before restarting Nighty.",
+                    "ERROR",
+                )
             else:
                 tab.toast("Some accounts stayed connected", f"Disconnected {count} of {len(connected_clients)} accounts. Check Managed Accounts for errors.", "ERROR")
         except Exception as e:
@@ -7505,7 +7910,7 @@ def vc_manager_farm_script():
         control_map = {
             "mute": ("is_muted", "mute", "Mute"),
             "deaf": ("is_deafened", "deaf", "Deafen"),
-            "stream": ("is_streaming", "stream", "Stream"),
+            "stream": ("desired_streaming", "stream", "Stream"),
             "video": ("is_camera_on", "video", "Camera"),
         }
         control = control_map.get(action)
@@ -7530,11 +7935,14 @@ def vc_manager_farm_script():
             update_token_table_rows()
             if result:
                 state_text = "enabled" if enabled else "disabled"
-                tab.toast(
-                    f"{label} {state_text}",
-                    f"{client.name} now uses this setting.",
-                    "SUCCESS",
-                )
+                if client.last_error:
+                    tab.toast(f"{label} changed but not saved", client.last_error, "ERROR")
+                else:
+                    tab.toast(
+                        f"{label} {state_text}",
+                        f"{client.name} now uses this setting.",
+                        "SUCCESS",
+                    )
             else:
                 tab.toast(
                     f"Could not update {label.lower()}",
@@ -7571,11 +7979,14 @@ def vc_manager_farm_script():
                         tab.toast("Account is not connected", f"{client.name} is already out of voice.", "ERROR")
                         return
                     if await client.leave_vc():
-                        tab.toast(
-                            "Account disconnected",
-                            f"{client.name} left the voice channel and remains saved.",
-                            "SUCCESS",
-                        )
+                        if client.last_error:
+                            tab.toast("Account left, but was not saved", client.last_error, "ERROR")
+                        else:
+                            tab.toast(
+                                "Account disconnected",
+                                f"{client.name} left the voice channel and remains saved.",
+                                "SUCCESS",
+                            )
                     else:
                         tab.toast(
                             "Disconnect failed",

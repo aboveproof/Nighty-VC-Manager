@@ -4,7 +4,7 @@
 
 Voice controls, session tracking, automation, slash commands, and multi-account connections for Nighty.
 
-[![Version](https://img.shields.io/badge/version-4.5.8-5865F2?style=flat-square)](./VCManager.py)
+[![Version](https://img.shields.io/badge/version-4.6.0-5865F2?style=flat-square)](./VCManager.py)
 [![NightyScript](https://img.shields.io/badge/NightyScript-5.0-111827?style=flat-square)](https://github.com/aboveproof/nighty-docs)
 [![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE)
@@ -46,7 +46,7 @@ The stream and camera controls update Discord voice-state flags. Actual media be
 - Fixed-height participant list with four users per page
 - Compact participant IDs
 - Active voice flags shown as `Mute | Deaf | Stream | Camera`
-- Clickable participant profiles with banners, decorations, badges, server tags, pronouns, roles, connections, and shared voice history
+- Clickable participant profiles with banners, profile effects, decorations, badges, server tags, pronouns, roles, connections, and shared voice history
 - Discord markdown and custom emoji rendering in participant bios
 - Channel telemetry for bitrate, region, user limit, occupancy, and channel ID
 - Voice-channel status editor with permission checks
@@ -89,13 +89,15 @@ Secondary accounts use direct Discord Gateway connections. Tokens stay in a loca
 - Active Nighty V2 theme support
 - Ephemeral responses enabled by default
 - Dashboard toggles for ephemeral responses, theme use, and detailed status
+- Interactive `/vc settings` menus for the same response options
+- Every `/vc` response uses Components V2 and the selected Themes V2 layout
 - `/vc history` buttons for previous and next pages, with Themes V2 images and separators
 - Command synchronization handled by Nighty
 
 ## Requirements
 
 - A working [Nighty](https://nighty.one/) installation
-- Nighty 2.6.2 or newer for Components V2 buttons
+- Nighty 2.3.2 or newer for native slash commands and Components V2 controls
 - Python 3.14 in Nighty's runtime
 - `aiohttp`, normally included with Nighty
 
@@ -172,7 +174,7 @@ The table uses `/vc`; substitute `/vcmanager` if Nighty reports that it reserves
 | `theme` | `true` | Applies the active Nighty V2 theme to Components V2 responses. |
 | `detailed` | `true` | Includes server, channel ID, and session time in `/vc status`. |
 
-Run `/vc settings` without arguments to view the saved values.
+Run `/vc settings` without arguments to view and change the saved values from dropdown menus. The optional command arguments remain available for direct updates.
 
 ## Local data
 
