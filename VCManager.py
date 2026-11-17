@@ -3,7 +3,7 @@
 # Voice controls, session data, and multi-token account management for Nighty
 
 @nightyScript(
-    name="VC Manager v4.5.6",
+    name="VC Manager v4.5.8",
     author="@rico, @snowy, @factz",
     description="Manage voice connections, controls, reconnects, follow mode, timers, and session stats.",
     usage="/vc <join|load|leave|mute|deafen|stream|camera|list|history|status|stats|settings|help>"
@@ -32,7 +32,7 @@ def vc_manager_farm_script():
 
     DEPENDENCIES:
     - aiohttp (normally bundled with Nighty; install with: pip install aiohttp)
-    - Slash commands use Nighty's application command tree.
+    - Slash commands use Nighty's native slashCommand API.
 
     NOTES:
     - Slash responses use Discord Components V2 and the active Nighty V2 theme.
@@ -58,7 +58,6 @@ def vc_manager_farm_script():
     # global and local namespaces, which can hide module imports from callbacks.
     import asyncio
     import functools
-    import hashlib
     import inspect
     import json
     import math
@@ -77,7 +76,7 @@ def vc_manager_farm_script():
 
     import aiohttp
 
-    SCRIPT_VERSION = "4.5.6"
+    SCRIPT_VERSION = "4.5.8"
     PROJECT_URL = "https://github.com/aboveproof/Nighty-VC-Manager"
     VERSION_SOURCE_URL = (
         "https://raw.githubusercontent.com/aboveproof/Nighty-VC-Manager/main/VCManager.py"
@@ -105,7 +104,7 @@ def vc_manager_farm_script():
                         "channel_id": str(previous_channel_id),
                         "muted": bool(getattr(previous_client, "is_muted", False)),
                         "deafened": bool(getattr(previous_client, "is_deafened", False)),
-                        "streaming": bool(getattr(previous_client, "is_streaming", False)),
+                        "streaming": bool(getattr(previous_client, "desired_streaming", False)),
                         "camera_on": bool(getattr(previous_client, "is_camera_on", False)),
                         "session_started_at": getattr(previous_client, "voice_session_started_at", None),
                         "session_guild_id": getattr(previous_client, "voice_session_guild_id", None),
@@ -1894,13 +1893,20 @@ def vc_manager_farm_script():
                 proxy.value = payload;
                 proxy.setAttribute('value', payload);
                 proxy.click();
+                proxy.value = '';
+                proxy.removeAttribute('value');
             },
             finish: function(formId, shouldClear) {
                 const form = document.getElementById(formId);
                 if (!form) return;
                 const tokenInput = form.querySelector('[data-vc-token-input]');
                 const nameInput = form.querySelector('[data-vc-token-name]');
+                const proxy = form.querySelector('[data-vc-token-proxy]');
                 const submitButton = form.querySelector('[data-vc-token-submit]');
+                if (proxy) {
+                    proxy.value = '';
+                    proxy.removeAttribute('value');
+                }
                 if (shouldClear && tokenInput) tokenInput.value = '';
                 if (shouldClear && nameInput) nameInput.value = '';
                 if (submitButton) {
@@ -2414,6 +2420,13 @@ def vc_manager_farm_script():
 
     VC_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     TOKENS_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        for private_path in [TOKENS_DATA_PATH, *TOKENS_DATA_PATH.parent.glob(f"{TOKENS_DATA_PATH.name}.corrupt-*.backup")]:
+            if private_path.exists():
+                try:
+                    os.chmod(private_path, 0o600)
+                except OSError as error:
+                    print(f"[VC Manager] Could not restrict access to {private_path.name}: {error}", type_="ERROR")
 
     file_lock = getattr(bot, "_vc_manager_file_lock", None)
     if file_lock is None:
@@ -2454,7 +2467,13 @@ def vc_manager_farm_script():
         try:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             backup_path = path.with_name(f"{path.name}.corrupt-{timestamp}.backup")
-            shutil.copy2(path, backup_path)
+            if path == TOKENS_DATA_PATH and os.name == "posix":
+                with open(path, "rb") as source:
+                    fd = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, "wb") as target:
+                        shutil.copyfileobj(source, target)
+            else:
+                shutil.copy2(path, backup_path)
             return backup_path
         except Exception as backup_error:
             print(f"[VC Manager] Could not back up broken file {path.name}: {backup_error}", type_="ERROR")
@@ -2499,13 +2518,26 @@ def vc_manager_farm_script():
             backup_broken_file(VC_DATA_PATH)
             return fresh_data()
 
+    def open_json_for_write(path, exclusive=False):
+        if os.name != "posix":
+            return open(path, "x" if exclusive else "w", encoding="utf-8", newline="\n")
+        flags = os.O_WRONLY | os.O_CREAT
+        flags |= os.O_EXCL if exclusive else os.O_TRUNC
+        fd = os.open(path, flags, 0o600)
+        try:
+            os.chmod(path, 0o600)
+            return os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+        except Exception:
+            os.close(fd)
+            raise
+
     def write_json_file(path, data, label):
         """Write JSON safely, including Windows hosts that briefly lock targets."""
         tmp = None
         try:
             with file_lock:
                 tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-                with open(tmp, "w", encoding="utf-8", newline="\n") as file:
+                with open_json_for_write(tmp, exclusive=True) as file:
                     json.dump(data, file, indent=4, ensure_ascii=False)
                     file.flush()
                     os.fsync(file.fileno())
@@ -2527,7 +2559,7 @@ def vc_manager_farm_script():
             # Antivirus software or sync tools may block file replacement while
             # allowing writes. Keep the fallback under the process lock.
                 try:
-                    with open(path, "w", encoding="utf-8", newline="\n") as file:
+                    with open_json_for_write(path) as file:
                         json.dump(data, file, indent=4, ensure_ascii=False)
                         file.flush()
                         os.fsync(file.fileno())
@@ -3606,7 +3638,7 @@ def vc_manager_farm_script():
                                     self._unexpected_voice_losses = 0
                                     self.is_muted = bool(d.get("self_mute", self.is_muted))
                                     self.is_deafened = bool(d.get("self_deaf", self.is_deafened))
-                                    self.is_streaming = bool(d.get("self_stream", False)) or self.desired_streaming
+                                    self.is_streaming = bool(d.get("self_stream", self.is_streaming))
                                     self.is_camera_on = bool(d.get("self_video", self.is_camera_on))
                                     self._set_status("Connected")
                                     if self.desired_streaming and (not was_in_vc or previous_channel_id != str(channel_id)):
@@ -3750,7 +3782,7 @@ def vc_manager_farm_script():
 
             self.is_muted = bool(mute)
             self.is_deafened = bool(deaf)
-            self.is_streaming = bool(stream)
+            self.is_streaming = False
             self.is_camera_on = bool(video)
             self.set_desired_voice(guild_id, channel_id, mute, deaf, stream, video)
             self._set_status("Joining")
@@ -3850,7 +3882,7 @@ def vc_manager_farm_script():
             requested_changes = (
                 mute is not None and as_bool(mute) != self.is_muted,
                 deaf is not None and as_bool(deaf) != self.is_deafened,
-                stream is not None and as_bool(stream) != self.is_streaming,
+                stream is not None,
                 video is not None and as_bool(video) != self.is_camera_on,
             )
             if not any(requested_changes):
@@ -3875,8 +3907,7 @@ def vc_manager_farm_script():
                 self.is_deafened = as_bool(deaf)
                 self.desired_deafened = self.is_deafened
             if stream is not None:
-                self.is_streaming = as_bool(stream)
-                self.desired_streaming = self.is_streaming
+                self.desired_streaming = as_bool(stream)
             if video is not None:
                 self.is_camera_on = as_bool(video)
                 self.desired_camera = self.is_camera_on
@@ -3895,7 +3926,7 @@ def vc_manager_farm_script():
                     })
 
                 if stream is not None:
-                    if self.is_streaming:
+                    if self.desired_streaming:
                         stream_payload = {
                             "op": 18,
                             "d": {
@@ -3938,7 +3969,7 @@ def vc_manager_farm_script():
                 self.record_id,
                 muted=self.is_muted,
                 deafened=self.is_deafened,
-                streaming=self.is_streaming,
+                streaming=self.desired_streaming,
                 camera_on=self.is_camera_on,
             )
             return True
@@ -4897,9 +4928,29 @@ def vc_manager_farm_script():
     except NameError:
         app_commands_api = None
     try:
+        slash_command_api = slashCommand
+    except NameError:
+        slash_command_api = None
+    try:
+        slash_reply_api = slashReply
+    except NameError:
+        slash_reply_api = None
+    try:
         slash_bot_app = bot_app
     except NameError:
         slash_bot_app = None
+
+    # Retire only the group installed by VC Manager's old manual slash adapter.
+    legacy_instances = getattr(bot, "_nighty_slash_active_instances", None)
+    legacy_vc_instance = legacy_instances.pop("VCManager", None) if isinstance(legacy_instances, dict) else None
+    if legacy_vc_instance and slash_bot_app:
+        try:
+            tree = slash_bot_app.tree
+            old_group = tree.get_command("vc")
+            if old_group and getattr(old_group, "description", None) == "Control VC Manager voice sessions":
+                tree.remove_command("vc")
+        except Exception as error:
+            print(f"[VC Manager] Could not retire the old /vc group: {error}", type_="ERROR")
 
     if slash_bot_app and isinstance(previous_runtime, dict):
         for event_name, previous_listener in previous_runtime.get("app_listeners", ()):
@@ -5088,10 +5139,22 @@ def vc_manager_farm_script():
         async def send_v2(self, title, description, ephemeral=None, footer=None):
             if ephemeral is None:
                 ephemeral = get_slash_response_settings()["ephemeral"]
-            content = f"## {title}\n{description}" if title else description
-            view = discord_api.ui.LayoutView()
-            view.add_item(themed_layout_container(content, footer=footer))
-            return await self.send_layout(view, private=ephemeral)
+            if footer is not None:
+                description = f"{description}\n\n{footer}"
+            if not callable(slash_reply_api) or not get_slash_response_settings()["use_theme"]:
+                content = f"## {title}\n{description}" if title else description
+                if discord_api and getattr(getattr(discord_api, "ui", None), "LayoutView", None):
+                    view = discord_api.ui.LayoutView()
+                    view.add_item(themed_layout_container(content))
+                    return await self.send_layout(view, private=ephemeral)
+                if not self.interaction.response.is_done():
+                    return await self.interaction.response.send_message(content=content, ephemeral=ephemeral)
+                return await self.interaction.followup.send(content=content, ephemeral=ephemeral)
+            if not self.interaction.response.is_done():
+                await self.interaction.response.defer(thinking=True, ephemeral=ephemeral)
+            result = await slash_reply_api(self.interaction, description, title=title)
+            self._done = True
+            return result
 
         async def send_layout(self, view, private=None):
             if private is None:
@@ -5114,39 +5177,19 @@ def vc_manager_farm_script():
             return await self.send_v2("VC Manager", message)
 
     class SlashAPI:
-        """Register the /vc group through Nighty's application command tree."""
+        """Keep existing command handlers while Nighty owns registration."""
         def __init__(self, label):
             self.label = label
-            self.registered = []
-            self._shapes = []
-            self._tree = getattr(slash_bot_app, "tree", None) if slash_bot_app else None
-            self._state_path = VC_DATA_PATH.parent / "slashapi_state.json"
-            self._session_synced = False
-            if not hasattr(bot, "_nighty_slash_active_instances"):
-                bot._nighty_slash_active_instances = {}
-            bot._nighty_slash_active_instances[label] = self
 
         @property
         def available(self):
-            return (
-                self._tree is not None
-                and app_commands_api is not None
-                and discord_api is not None
-                and getattr(getattr(discord_api, "ui", None), "LayoutView", None) is not None
-            )
+            return callable(slash_command_api)
 
         def _wrap(self, func):
             @functools.wraps(func)
             async def wrapper(interaction, *args, **kwargs):
                 ctx = VCSlashContext(interaction)
-                try:
-                    return await func(ctx, *args, **kwargs)
-                except Exception as e:
-                    print(f"[VC Manager Slash] {func.__name__} failed: {e}", type_="ERROR")
-                    try:
-                        await ctx.error("The command could not be completed.")
-                    except Exception as response_error:
-                        print(f"[VC Manager Slash] Could not show command error: {response_error}", type_="ERROR")
+                return await func(ctx, *args, **kwargs)
 
             try:
                 signature = inspect.signature(func)
@@ -5166,105 +5209,48 @@ def vc_manager_farm_script():
         def group(self, name, description):
             if not self.available:
                 return None
-            try:
-                self._tree.remove_command(name)
-            except Exception:
-                pass
-            group_obj = app_commands_api.Group(name=name, description=description[:100])
-            contexts = getattr(app_commands_api, "allowed_contexts", None)
-            if callable(contexts):
-                try:
-                    group_obj = contexts(guilds=True, dms=True, private_channels=True)(group_obj)
-                except Exception as error:
-                    print(f"[VC Manager Slash] Command contexts failed: {error}", type_="ERROR")
-            installs = getattr(app_commands_api, "allowed_installs", None)
-            if callable(installs):
-                try:
-                    group_obj = installs(guilds=True, users=True)(group_obj)
-                except Exception as error:
-                    print(f"[VC Manager Slash] User installs failed: {error}", type_="ERROR")
-            self._tree.add_command(group_obj)
-            self.registered.append(name)
-            return SlashGroup(self, group_obj)
-
-        def fingerprint(self):
-            raw = json.dumps(self._shapes, sort_keys=True, separators=(",", ":"))
-            return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-
-        def autosync(self):
-            if not self.available:
-                return
-
-            async def runner():
-                try:
-                    wait_ready = getattr(bot, "wait_until_ready", None)
-                    if callable(wait_ready):
-                        await wait_ready()
-                    await asyncio.sleep(3)
-                    state = {}
-                    if self._state_path.exists():
-                        try:
-                            with open(self._state_path, "r", encoding="utf-8") as file:
-                                state = json.load(file)
-                        except Exception:
-                            state = {}
-                    current = self.fingerprint()
-                    previous = (state.get(self.label) or {}).get("fingerprint")
-                    if previous != current or not self._session_synced:
-                        await self._tree.sync()
-                        self._session_synced = True
-                        state[self.label] = {
-                            "fingerprint": current,
-                            "commands": list(self.registered),
-                        }
-                        with open(self._state_path, "w", encoding="utf-8") as file:
-                            json.dump(state, file, indent=2)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    print(f"[VC Manager Slash] Auto-sync failed: {error}", type_="ERROR")
-
-            safe_create_task(runner())
+            return SlashGroup(self, name, description)
 
     class SlashGroup:
-        def __init__(self, api, group_obj):
+        def __init__(self, api, name, description):
             self.api = api
-            self.group = group_obj
-
-        @property
-        def name(self):
-            return self.group.name
+            self.name = name
+            self.description = description
 
         def command(self, name, description, describe=None):
             def decorator(func):
                 handler = self.api._wrap(func)
-                if describe:
+                if describe and app_commands_api is not None:
                     try:
                         handler = app_commands_api.describe(**describe)(handler)
                     except Exception as e:
                         print(f"[VC Manager Slash] Option descriptions failed: {e}", type_="ERROR")
-                result = self.group.command(name=name, description=description[:100])(handler)
-                params = []
-                for parameter in list(inspect.signature(func).parameters.values())[1:]:
-                    params.append({
-                        "name": parameter.name,
-                        "annotation": getattr(parameter.annotation, "__name__", str(parameter.annotation)),
-                        "required": parameter.default is inspect.Parameter.empty,
-                    })
-                self.api._shapes.append({
-                    "parent": self.group.name,
-                    "name": name,
-                    "description": description,
-                    "params": params,
-                })
-                return result
+                def register(group_name):
+                    return slash_command_api(
+                        name=name,
+                        description=description[:100],
+                        group=group_name,
+                        group_description=self.description,
+                    )(handler)
+
+                try:
+                    return register(self.name)
+                except Exception as error:
+                    if self.name != "vc" or "already used by a built-in Nighty command" not in str(error):
+                        raise
+                    self.name = "vcmanager"
+                    print(
+                        "[VC Manager] Nighty reserves /vc. Use /vcmanager commands for this Nighty build.",
+                        type_="ERROR",
+                    )
+                    return register(self.name)
             return decorator
 
     slash = SlashAPI(label="VCManager")
     vc_group = slash.group("vc", "Control VC Manager voice sessions") if slash.available else None
     if vc_group is None:
         print(
-            "[VC Manager] Slash commands need Nighty's application command tree and Components V2. The VC Manager tab can still be used.",
+            "[VC Manager] Nighty's native slashCommand API is unavailable. Update Nighty, then reload the script. The VC Manager tab can still be used.",
             type_="ERROR",
         )
 
@@ -5714,8 +5700,6 @@ def vc_manager_farm_script():
                 command_list.replace("`/vc ", f"`/{vc_group.name} "),
             )
 
-        slash.autosync()
-
     # ==================== UI CONSTRUCTION ====================
 
     tab = Tab(name="VC Manager", icon="users", gap=4)
@@ -5936,7 +5920,7 @@ def vc_manager_farm_script():
     )
     command_settings_card.create_ui_element(
         UI.Text,
-        content="Use these toggles for /vc settings.",
+        content="These toggles also control slash command settings.",
         size="sm",
     )
 
@@ -7841,6 +7825,8 @@ def vc_manager_farm_script():
             if not match:
                 return
             latest_version = match.group(1).strip()
+            if not re.fullmatch(r"\d+(?:\.\d+){0,3}(?:[-+][A-Za-z0-9.-]+)?", latest_version):
+                return
             if version_tuple(latest_version) <= version_tuple(SCRIPT_VERSION):
                 return
             tab.updateavailablemodal(

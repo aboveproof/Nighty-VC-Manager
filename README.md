@@ -4,7 +4,7 @@
 
 Voice controls, session tracking, automation, slash commands, and multi-account connections for Nighty.
 
-[![Version](https://img.shields.io/badge/version-4.5.6-5865F2?style=flat-square)](./VCManager.py)
+[![Version](https://img.shields.io/badge/version-4.5.8-5865F2?style=flat-square)](./VCManager.py)
 [![NightyScript](https://img.shields.io/badge/NightyScript-5.0-111827?style=flat-square)](https://github.com/aboveproof/nighty-docs)
 [![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](https://github.com/aboveproof/Nighty-VC-Manager/blob/main/LICENSE)
@@ -83,14 +83,14 @@ Secondary accounts use direct Discord Gateway connections. Tokens stay in a loca
 
 ### Slash commands and Components V2
 
-- `/vc` command registration through Nighty's application command tree
+- Native slash commands registered through Nighty's `@slashCommand` API
 - Owner-only command execution
 - Components V2 responses using the active Nighty theme
 - Active Nighty V2 theme support
 - Ephemeral responses enabled by default
 - Dashboard toggles for ephemeral responses, theme use, and detailed status
 - `/vc history` buttons for previous and next pages, with Themes V2 images and separators
-- Command synchronization handled by VC Manager
+- Command synchronization handled by Nighty
 
 ## Requirements
 
@@ -112,11 +112,11 @@ VC Manager is written in **Python for NightyScript 5.0**. NightyScript is Nighty
 That distinction matters if you plan to read, modify, or contribute to the code:
 
 - `@nightyScript(...)` declares the script and its metadata. The decorated entry function is called at the bottom of the file to register the UI, listeners, commands, and background tasks.
-- `bot`, `bot_app`, `discord_bot`, `app_commands`, `UI`, `Tab`, `getConfigData`, and `getScriptsPath` come from Nighty's runtime. They are available without imports.
+- `bot`, `discord_bot`, `app_commands`, `slashCommand`, `slashReply`, `UI`, `Tab`, `getConfigData`, and `getScriptsPath` come from Nighty's runtime. They are available without imports.
 - The script must not import `discord`, `nighty`, or symbols from either package. Nighty uses a modified `discord.py-self` environment and provides supported objects itself.
 - Discord and Nighty operations are asynchronous. Connection work, API requests, UI callbacks, event listeners, and cleanup run through `async` functions and tasks.
 - The dashboard uses CUI. Python classes describe elements with HTML templates, while Nighty connects their callbacks to the embedded web interface.
-- Slash commands use the application command tree that worked in earlier VC Manager versions. All replies use Components V2 layouts with the active theme; history adds button callbacks to its layout.
+- Slash commands use Nighty's native `@slashCommand` registration. The active Nighty theme handles normal replies; history adds button callbacks to its Components V2 layout.
 - Persistent settings use Nighty's configuration store for simple values and JSON files under `getScriptsPath()` for session history and managed accounts.
 - Secondary accounts do not become additional Nighty clients. Each one opens its own authenticated Discord Gateway and voice connection managed by this script.
 
@@ -126,7 +126,7 @@ The main runtime path is:
 Nighty loads VCManager.py
   -> @nightyScript initializes the script
   -> CUI registers the VC Manager tab
-  -> VC Manager synchronizes /vc commands
+  -> Nighty registers and synchronizes the slash commands
   -> a dashboard action or slash command updates managed state
   -> Discord Gateway and voice WebSocket tasks apply the change
   -> JSON storage records settings and session history
@@ -140,9 +140,11 @@ Nighty loads VCManager.py
 4. Open the **VC Manager** tab in Nighty.
 5. Select a server and voice channel, then press **Join Voice**.
 
-The script registers `/vc` after Nighty finishes connecting. If Discord does not show the command after the first load, wait a few seconds and press `Ctrl+R` in Discord.
+Nighty registers `/vc` after connecting. If that name is reserved by the Nighty build, the script registers `/vcmanager` instead and prints a notice in the Nighty console. Wait a few seconds after loading the script, then refresh Discord if the commands have not appeared.
 
 ## Slash commands
+
+The table uses `/vc`; substitute `/vcmanager` if Nighty reports that it reserves `/vc`.
 
 | Command | Arguments | Action |
 | --- | --- | --- |
@@ -179,7 +181,6 @@ VC Manager creates these files under Nighty's `json` script-data directory:
 ```text
 vc_manager_data.json      Session history, timers, automation, and slash settings
 vc_manager_tokens.json    Secondary account tokens and labels
-slashapi_state.json        Saved /vc command definition fingerprint
 ```
 
 Do not commit or share these files. `vc_manager_tokens.json` contains usable Discord account tokens in plain text.
@@ -190,7 +191,8 @@ Do not commit or share these files. `vc_manager_tokens.json` contains usable Dis
 - One Discord account can hold one voice state per server. Use a secondary account for two channels in the same server.
 - Channel-status editing requires Discord's **Voice Channel Status** permission for the connected channel.
 - The script depends on private Nighty and Discord behavior. Client or API updates can break individual controls.
-- Slash commands require Nighty's application command tree and Components V2. The CUI dashboard can still load when those are unavailable.
+- Slash commands require Nighty's native `@slashCommand` API. The CUI dashboard can still load without it.
+- Command visibility in servers, DMs, and group chats also depends on Nighty's application installation and Discord's command registration.
 - Global slash-command changes can take time to appear in Discord's cache.
 
 ## Troubleshooting
@@ -205,7 +207,7 @@ Update to the latest script and reload the Nighty tab. The CUI recovery layer su
 <details>
 <summary><strong>The /vc command does not appear</strong></summary>
 
-Wait for VC Manager's command sync, then reload Discord with `Ctrl+R`. Repeated script reloads can hit Discord's application-command rate limit and delay the menu update. Check the Nighty console for a sync error. Confirm that your Nighty build exposes `bot_app.tree`.
+Wait for Nighty's script command sync, then refresh Discord. Check the Nighty console for a registration error or a notice to use `/vcmanager`. If the command appears in one chat but not another, check where Nighty's application commands are available for your account.
 
 </details>
 
